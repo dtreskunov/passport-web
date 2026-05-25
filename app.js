@@ -60,6 +60,19 @@ function show(name) {
 function setStatus(msg, level = "") {
   statusEl.textContent = msg;
   statusEl.className = "status" + (level ? " " + level : "");
+  statusEl.hidden = !msg;
+}
+
+// Warning is surfaced on the Retake button itself: "Retake" by default,
+// or the warning text in warn color when the crop is out of spec.
+function setWarning(msg) {
+  if (msg) {
+    redoBtn.textContent = msg;
+    redoBtn.classList.add("warn");
+  } else {
+    redoBtn.textContent = "Retake";
+    redoBtn.classList.remove("warn");
+  }
 }
 
 // ── MediaPipe ──────────────────────────────────────────────────────────────
@@ -362,17 +375,17 @@ async function goToResult() {
   capturedCv.getContext("2d").drawImage(capturedBitmap, 0, 0);
   fitOverlayToCanvas();
   setStatus("");
+  setWarning("");
   spinnerEl.hidden = false;
   downloadBtn.disabled = true;
   plan = null; landmarks = null;
-  clearOverlay();
-  // Yield so the browser actually paints the spinner before we hog the main
+  clearOverlay();  // Yield so the browser actually paints the spinner before we hog the main
   // thread with the synchronous landmarker.detect() call.
   await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   try {
     const lm = await detectLandmarks();
     if (!lm) {
-      setStatus("No face detected. Retake with better lighting / framing.", "warn");
+      setStatus("No face detected. Retake with better lighting / framing.", "err");
     } else {
       landmarks = lm;
       computePlan();
@@ -432,7 +445,7 @@ function computePlan() {
       eyeCount++;
     }
   }
-  if (eyeCount === 0) { plan = null; setStatus("Could not locate eyes.", "warn"); return; }
+  if (eyeCount === 0) { plan = null; setStatus("Could not locate eyes.", "err"); return; }
   const eyeY  = eyeSum / eyeCount;
   const faceX = bboxX + bboxW / 2;
   const chinY = bboxY + bboxH;
@@ -487,9 +500,9 @@ function computePlan() {
     if (lack.below) dirs.push("below");
     if (lack.left || lack.right) dirs.push("beside");
     const where = dirs.length ? dirs.join(" / ") : "around";
-    setStatus(`Retake with more space ${where} your head`, "warn");
+    setWarning(`Retake with more space ${where} your head`);
   } else {
-    setStatus("");
+    setWarning("");
   }
 }
 

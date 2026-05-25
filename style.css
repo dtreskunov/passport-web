@@ -237,14 +237,14 @@ button {
 .status {
   margin: 0 auto;
   width: 100%;
-  max-width: 410px;   /* matches two .big buttons (200 + 10 gap + 200) */
+  max-width: 480px;
   font: inherit;
   font-size: 16px;
   font-weight: 500;
   text-align: center;
-  color: transparent;
-  background: transparent;
-  border: 1px solid transparent;
+  color: var(--err);
+  background: var(--secondary-bg);
+  border: 1px solid var(--secondary-border);
   border-radius: 12px;
   padding: 14px 18px;
   min-height: 48px;
@@ -254,16 +254,18 @@ button {
   line-height: 1.2;
   box-sizing: border-box;
 }
-.status.warn,
-.status.err {
-  background: var(--secondary-bg);
-  border-color: var(--secondary-border);
-}
-.status.warn { color: var(--warn); }
-.status.err  { color: var(--err); }
+.status[hidden] { display: none; }
 .actions {
   display: flex;
+  flex-direction: column;
   gap: 10px;
-  justify-content: center;
+  align-items: stretch;
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
 }
-.actions .big { flex: 1; max-width: 200px; }
+.actions .big { width: 100%; }
+.big.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
