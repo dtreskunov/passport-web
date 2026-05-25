@@ -565,7 +565,10 @@ function checkBackground() {
   if (n === 0) return { ok: true, mean: 255, std: 0 };
   const mean = sumY / n;
   const std  = Math.sqrt(Math.max(0, sumY2 / n - mean * mean));
-  const ok = mean >= 215 && std <= 22;
+  // Permissive on brightness (subjects shot in dim rooms have darker but
+  // still acceptable backgrounds); strict on uniformity (patterns /
+  // shadows / objects raise the variance).
+  const ok = mean >= 160 && std <= 22;
   return { ok, mean, std };
 }
 
@@ -648,13 +651,13 @@ async function fixBackground() {
     const oldG = bn ? bg_ / bn : 244;
     const oldB = bn ? bb  / bn : 244;
 
-    // Match the replacement background's brightness to the original so the
-    // composite blends with the lighting on the subject, then clamp into
-    // the US passport "plain white / off-white" band (Rec.709 luma in
-    // [230, 250]) so we stay spec-compliant even if the original was dark.
-    // Neutral gray (R=G=B) avoids introducing a color cast.
+    // Match the replacement background's brightness to the original so it
+    // blends with whatever lighting the subject was shot in. Only cap at
+    // the bright end (so we never produce a darker-than-original bg) and
+    // apply a low floor to avoid pitch black on extreme cases. Neutral
+    // gray (R=G=B) avoids introducing a colour cast.
     const oldLuma = 0.2126 * oldR + 0.7152 * oldG + 0.0722 * oldB;
-    const newLuma = Math.max(230, Math.min(250, oldLuma));
+    const newLuma = Math.max(160, Math.min(250, oldLuma));
     const NEW_R = newLuma | 0, NEW_G = newLuma | 0, NEW_B = newLuma | 0;
 
     // Per-pixel alpha matting:
