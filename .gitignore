@@ -1,0 +1,21 @@
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# Local dependencies (none yet, but in case `serve` is ever installed locally)
+node_modules/
+
+# Exported Copilot chat sessions (kept out of source history)
+chat.json
+chat-*.json
+
+# Build / output (none yet)
+dist/
+build/

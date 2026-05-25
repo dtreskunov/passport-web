@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Passport Photo — web</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Passport Photo</h1>
+    <p class="sub">Takes a square US-passport-spec crop from your webcam. Runs entirely in your browser; nothing is uploaded.</p>
+  </header>
+
+  <main>
+    <section class="stage">
+      <div id="liveWrap" class="frameWrap">
+        <video id="video" autoplay playsinline muted></video>
+        <div id="liveOverlay" class="overlay"></div>
+      </div>
+      <canvas id="captured" class="frameWrap" hidden></canvas>
+      <canvas id="overlay" class="overlay" hidden></canvas>
+
+      <div class="controls">
+        <button id="startBtn">Start camera</button>
+        <button id="captureBtn" disabled>Capture</button>
+        <button id="redoBtn" disabled>Retake</button>
+        <button id="downloadBtn" disabled>Download crop</button>
+      </div>
+      <p id="status" class="status">Click "Start camera" to begin.</p>
+    </section>
+
+    <aside class="panel">
+      <h2>Targets</h2>
+      <label>Head height (% of crop)
+        <input id="headFrac" type="number" min="50" max="69" step="1" value="55" />
+      </label>
+      <label>Eye line from bottom (%)
+        <input id="eyeFrac" type="number" min="56" max="69" step="1" value="60" />
+      </label>
+      <label>Output size (px per side)
+        <input id="outSize" type="number" min="600" max="1200" step="50" value="900" />
+      </label>
+
+      <h2>US spec</h2>
+      <ul class="spec">
+        <li>Square 1:1</li>
+        <li>600–1200 px per side</li>
+        <li>Head height 50–69%</li>
+        <li>Eye line 56–69% from bottom</li>
+        <li>No digital alteration beyond cropping</li>
+      </ul>
+
+      <h2>Tips</h2>
+      <ul class="tips">
+        <li>Plain light background</li>
+        <li>Face the camera straight on, neutral expression</li>
+        <li>Even lighting on both sides of the face</li>
+        <li>No glasses, no head covering (unless religious)</li>
+      </ul>
+    </aside>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
