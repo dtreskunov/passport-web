@@ -491,14 +491,16 @@ function computePlan() {
     headRatio, eyeFromBottom,
   };
 
-  // Only warn when the final crop is actually outside passport spec. Edge
-  // clamping by itself isn't a problem if the resulting head/eye ratios
-  // still fall in the allowed bands.
-  if (headBad || eyeBad) {
+  // Warn when the final crop is out of US passport spec, or when the face
+  // sits so close to a side edge that the crop had to be shifted
+  // horizontally (head/eye ratios are vertical metrics and won't catch
+  // sideways clamping on their own).
+  const sideClamped = lack.left || lack.right;
+  if (headBad || eyeBad || sideClamped) {
     const dirs = [];
     if (lack.above) dirs.push("above");
     if (lack.below) dirs.push("below");
-    if (lack.left || lack.right) dirs.push("beside");
+    if (sideClamped) dirs.push("beside");
     const where = dirs.length ? dirs.join(" / ") : "around";
     setWarning(`Retake with more space ${where} your head`);
   } else {
