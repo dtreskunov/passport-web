@@ -151,7 +151,40 @@ async function detectLandmarks() {
     z: p.z,
   }));
 }
+// Photo settings (imageWidth/imageHeight) chosen at camera-start time so
+// ImageCapture.takePhoto() returns a still that matches the preview track's
+// aspect ratio. Null = let the device pick (its sensor-native aspect, which
+// usually differs from the preview).
+let photoSettings = null;
 
+async function pickPhotoSettings(track) {
+  if (!("ImageCapture" in window)) return null;
+  try {
+    const ic = new ImageCapture(track);
+    const caps = await ic.getPhotoCapabilities();
+    const ts = track.getSettings();
+    if (!caps?.imageHeight || !caps?.imageWidth || !ts.width || !ts.height) return null;
+    const aspect = ts.width / ts.height;
+    const snap = (v, step, lo, hi) => {
+      const s = step || 1;
+      let n = Math.round(v / s) * s;
+      return Math.max(lo, Math.min(hi, n));
+    };
+    // Use the camera's max photo height, derive width from the preview
+    // aspect, then clamp/snap into the photo width's allowed range.
+    let h = caps.imageHeight.max;
+    let w = snap(h * aspect, caps.imageWidth.step,
+                  caps.imageWidth.min, caps.imageWidth.max);
+    // If width got clamped, recompute height from width so the aspect holds.
+    if (Math.abs(w / h - aspect) > 0.01) {
+      h = snap(w / aspect, caps.imageHeight.step,
+               caps.imageHeight.min, caps.imageHeight.max);
+    }
+    return { imageWidth: w, imageHeight: h };
+  } catch {
+    return null;
+  }
+}
 // ── Camera ─────────────────────────────────────────────────────────────────
 async function enterCamera() {
   show("camera");
@@ -176,6 +209,7 @@ async function enterCamera() {
     });
     video.srcObject = stream;
     await video.play();
+    photoSettings = await pickPhotoSettings(stream.getVideoTracks()[0]);
     ensureLandmarker().catch(() => {});  // warm the model
   } catch (err) {
     alert("Camera error: " + err.message);
@@ -254,7 +288,7 @@ async function captureFromVideo() {
     if (!track || !("ImageCapture" in window)) return null;
     try {
       const ic = new ImageCapture(track);
-      const blob = await ic.takePhoto();
+      const blob = await ic.takePhoto(photoSettings || undefined);
       const bmp = await createImageBitmap(blob);
       return await mirrorBitmap(bmp);
     } catch {
