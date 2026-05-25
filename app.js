@@ -541,6 +541,143 @@ function computePlan() {
 
 
 // ── Background detection / fix ─────────────────────────────────────────────
+
+// Box (mean) filter over a (2r+1)x(2r+1) window using a summed-area table.
+// `src` and `dst` are Float32Arrays of length W*H. `dst` may equal `src`.
+// O(W*H), independent of r.
+function boxFilter(src, dst, W, H, r) {
+  const II = new Float64Array((W + 1) * (H + 1));
+  for (let y = 1; y <= H; y++) {
+    const rowOff = y * (W + 1);
+    const prevRow = rowOff - (W + 1);
+    let rowSum = 0;
+    for (let x = 1; x <= W; x++) {
+      rowSum += src[(y - 1) * W + (x - 1)];
+      II[rowOff + x] = II[prevRow + x] + rowSum;
+    }
+  }
+  for (let y = 0; y < H; y++) {
+    const y0 = y - r < 0 ? 0 : y - r;
+    const y1 = y + r + 1 > H ? H : y + r + 1;
+    const r0 = y0 * (W + 1), r1 = y1 * (W + 1);
+    for (let x = 0; x < W; x++) {
+      const x0 = x - r < 0 ? 0 : x - r;
+      const x1 = x + r + 1 > W ? W : x + r + 1;
+      const area = (x1 - x0) * (y1 - y0);
+      dst[y * W + x] =
+        (II[r1 + x1] - II[r0 + x1] - II[r1 + x0] + II[r0 + x0]) / area;
+    }
+  }
+}
+
+// Edge-aware guided filter (He, Sun, Tang 2010). Refines a coarse value map
+// `p` using a high-resolution guide `I`; output `q` snaps to edges in I.
+// For matting, p is the coarse alpha and I is the photo's luminance.
+function guidedFilter(I, p, W, H, r, eps) {
+  const N = W * H;
+  const tmp     = new Float32Array(N);
+  const meanI   = new Float32Array(N);
+  const meanP   = new Float32Array(N);
+  const corrI   = new Float32Array(N);
+  const corrIp  = new Float32Array(N);
+
+  boxFilter(I, meanI, W, H, r);
+  boxFilter(p, meanP, W, H, r);
+  for (let i = 0; i < N; i++) tmp[i] = I[i] * I[i];
+  boxFilter(tmp, corrI, W, H, r);
+  for (let i = 0; i < N; i++) tmp[i] = I[i] * p[i];
+  boxFilter(tmp, corrIp, W, H, r);
+
+  const a = new Float32Array(N);
+  const b = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const vI    = corrI[i]  - meanI[i] * meanI[i];
+    const covIp = corrIp[i] - meanI[i] * meanP[i];
+    a[i] = covIp / (vI + eps);
+    b[i] = meanP[i] - a[i] * meanI[i];
+  }
+  // Reuse meanI/meanP buffers for mean_a / mean_b.
+  boxFilter(a, meanI, W, H, r);
+  boxFilter(b, meanP, W, H, r);
+
+  const q = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const v = meanI[i] * I[i] + meanP[i];
+    q[i] = v < 0 ? 0 : v > 1 ? 1 : v;
+  }
+  return q;
+}
+
+// Refine a 256-pixel coarse confidence mask into a per-pixel alpha that
+// snaps to real edges in the photo, via guided filtering at a working
+// resolution capped to ~0.7 MP for memory/time. The final alpha is
+// bilinearly upsampled to the full resolution of the photo.
+function refineMaskGuided(coarseMaskCv, photoCv, W, H) {
+  const TARGET = 700_000;
+  const scale = Math.min(1, Math.sqrt(TARGET / (W * H)));
+  const sW = Math.max(64, Math.round(W * scale));
+  const sH = Math.max(64, Math.round(H * scale));
+
+  // Downsample guide (photo) to working resolution and pull luma.
+  const gCv = new OffscreenCanvas(sW, sH);
+  const gctx = gCv.getContext("2d", { willReadFrequently: true });
+  gctx.imageSmoothingEnabled = true;
+  gctx.imageSmoothingQuality = "high";
+  gctx.drawImage(photoCv, 0, 0, sW, sH);
+  const gd = gctx.getImageData(0, 0, sW, sH).data;
+
+  // Bilinearly upsample the 256-px coarse mask to the same working res.
+  const mCv = new OffscreenCanvas(sW, sH);
+  const mctx = mCv.getContext("2d", { willReadFrequently: true });
+  mctx.imageSmoothingEnabled = true;
+  mctx.imageSmoothingQuality = "high";
+  mctx.drawImage(coarseMaskCv, 0, 0, sW, sH);
+  const md = mctx.getImageData(0, 0, sW, sH).data;
+
+  const sN = sW * sH;
+  const I = new Float32Array(sN);
+  const p = new Float32Array(sN);
+  // Binarize the coarse mask at 0.5 before refinement. The segmenter's
+  // soft confidence extends well past the true person silhouette, and
+  // feeding that soft band into the guided filter lets the photo guide
+  // drag alpha out along weak furniture edges in the background. With a
+  // hard 0/1 input, the filter only has to soften the one true edge.
+  for (let i = 0, j = 0; i < gd.length; i += 4, j++) {
+    I[j] = (0.2126 * gd[i] + 0.7152 * gd[i + 1] + 0.0722 * gd[i + 2]) / 255;
+    p[j] = md[i + 3] >= 128 ? 1 : 0;
+  }
+
+  // Small radius so the filter only does local edge alignment (a few
+  // pixels around the binarized boundary), not regional smoothing.
+  const r = Math.max(2, Math.round(Math.min(sW, sH) / 200));
+  const eps = 1e-4;
+  const q = guidedFilter(I, p, sW, sH, r, eps);
+
+  // Remap the refined alpha: snap the lowest band to 0 and the highest
+  // band to 1, with a linear ramp between. Without this, the guided
+  // filter leaves a faint soft "skirt" extending into the true bg, and
+  // the matting equation in that skirt evaluates to α·realBg + (1-α)·NEW,
+  // which is darker than NEW whenever the real bg is darker than the new
+  // gray — producing a visible shadow halo around the person. We keep
+  // the ramp wide enough to preserve hair anti-aliasing.
+  const LO = 0.25, HI = 0.85, SPAN = HI - LO;
+  const qCv = new OffscreenCanvas(sW, sH);
+  const qImg = new ImageData(sW, sH);
+  for (let j = 0; j < sN; j++) {
+    let v = q[j];
+    v = v <= LO ? 0 : v >= HI ? 1 : (v - LO) / SPAN;
+    qImg.data[j * 4 + 3] = (v * 255) | 0;
+  }
+  qCv.getContext("2d").putImageData(qImg, 0, 0);
+
+  const upCv = new OffscreenCanvas(W, H);
+  const uctx = upCv.getContext("2d", { willReadFrequently: true });
+  uctx.imageSmoothingEnabled = true;
+  uctx.imageSmoothingQuality = "high";
+  uctx.drawImage(qCv, 0, 0, W, H);
+  return uctx.getImageData(0, 0, W, H).data;   // RGBA, alpha = refined α
+}
+
 // US passport spec calls for a plain white or off-white background with no
 // patterns or shadows. We sample everything in the crop except an expanded
 // face/head/shoulders region (anything left should be pure background) and
@@ -626,28 +763,13 @@ async function fixBackground() {
     for (const m of result.confidenceMasks) m.close?.();
     result.close?.();
 
-    // Upscale to full resolution with a tiny blur to round off the 256-px
-    // grid, then sigmoid-sharpen the alpha. The blur smooths the grid
-    // staircase; the sigmoid then collapses the wide α∈(0,1) band into a
-    // 1-2 pixel anti-aliased edge. Low-confidence ghost regions (the
-    // segmenter "seeing" a partial person at the frame boundary, for
-    // example) get pushed to 0 and disappear entirely.
-    const upMask = new OffscreenCanvas(W, H);
-    const uctx = upMask.getContext("2d", { willReadFrequently: true });
-    uctx.imageSmoothingEnabled = true;
-    uctx.imageSmoothingQuality = "high";
-    uctx.filter = `blur(${Math.max(1, Math.round(W / 800))}px)`;
-    uctx.drawImage(maskCv, 0, 0, W, H);
-    uctx.filter = "none";
-    const upAlpha = uctx.getImageData(0, 0, W, H).data;
-    // α' = clamp((α − 0.5) · GAIN + 0.5). GAIN 6 keeps a ~16% wide soft
-    // band around the threshold, which is ~1-2 px after upsampling.
-    const GAIN = 6;
-    for (let i = 3; i < upAlpha.length; i += 4) {
-      const a = upAlpha[i] / 255;
-      const s = (a - 0.5) * GAIN + 0.5;
-      upAlpha[i] = s <= 0 ? 0 : s >= 1 ? 255 : (s * 255) | 0;
-    }
+    // Refine the coarse 256-px mask with an edge-aware guided filter
+    // (He et al. 2010), using the photo's luminance as the guide. The
+    // resulting alpha snaps to actual hair / jaw / shoulder edges in the
+    // photo instead of the soft bilinear-upsample blur that produced the
+    // visible halo, and low-confidence ghost regions vanish into the
+    // background mean without needing a separate sigmoid hardening pass.
+    const upAlpha = refineMaskGuided(maskCv, capturedCv, W, H);
 
     // Pull the photo at full resolution.
     const srcCv = new OffscreenCanvas(W, H);
@@ -656,25 +778,94 @@ async function fixBackground() {
     const sdata = sctx.getImageData(0, 0, W, H).data;
     const N = sdata.length;
 
-    // Estimate the *old* background color by averaging pixels the mask
-    // says are definitely background (alpha < ~3%). That color is what's
-    // currently contaminating the edge pixels of the person.
-    let br = 0, bg_ = 0, bb = 0, bn = 0;
-    for (let i = 0; i < N; i += 16) {        // every 4th pixel is plenty
-      if (upAlpha[i + 3] < 8) {
-        br += sdata[i]; bg_ += sdata[i + 1]; bb += sdata[i + 2]; bn++;
+    // Estimate the *old* background as a smooth spatially-varying color
+    // field instead of one global average. Real backgrounds aren't a
+    // single color (warmer near a wall, cooler near a window, etc.), and
+    // subtracting one global mean from edge pixels in the matting
+    // equation leaves a tinted halo. We sample the photo only where the
+    // refined alpha says the pixel is definitely background, then
+    // box-filter to extend the color into the foreground region.
+    //
+    // Operate at a downsampled resolution (~150 px short side) for speed;
+    // the bg color field varies slowly so coarse is fine.
+    const bgW = Math.max(32, Math.round(W / Math.max(W, H) * 200));
+    const bgH = Math.max(32, Math.round(H / Math.max(W, H) * 200));
+    const bgN = bgW * bgH;
+    const bgCv = new OffscreenCanvas(bgW, bgH);
+    const bgctx = bgCv.getContext("2d", { willReadFrequently: true });
+    bgctx.imageSmoothingEnabled = true;
+    bgctx.imageSmoothingQuality = "high";
+    bgctx.drawImage(capturedCv, 0, 0, bgW, bgH);
+    const bgSrc = bgctx.getImageData(0, 0, bgW, bgH).data;
+    // Also downsample the alpha to bg grid for the mask.
+    const aCv = new OffscreenCanvas(bgW, bgH);
+    const actx = aCv.getContext("2d", { willReadFrequently: true });
+    const aFull = new ImageData(W, H);
+    for (let i = 3; i < upAlpha.length; i += 4) aFull.data[i] = upAlpha[i];
+    const aFullCv = new OffscreenCanvas(W, H);
+    aFullCv.getContext("2d").putImageData(aFull, 0, 0);
+    actx.imageSmoothingEnabled = true;
+    actx.imageSmoothingQuality = "high";
+    actx.drawImage(aFullCv, 0, 0, bgW, bgH);
+    const aLow = actx.getImageData(0, 0, bgW, bgH).data;
+
+    const rBuf = new Float32Array(bgN);
+    const gBuf = new Float32Array(bgN);
+    const bBuf = new Float32Array(bgN);
+    const wBuf = new Float32Array(bgN);
+    for (let i = 0, j = 0; i < bgSrc.length; i += 4, j++) {
+      // Weight = 1 where definitely background, 0 elsewhere.
+      const w = aLow[i + 3] < 24 ? 1 : 0;
+      wBuf[j] = w;
+      rBuf[j] = bgSrc[i]     * w;
+      gBuf[j] = bgSrc[i + 1] * w;
+      bBuf[j] = bgSrc[i + 2] * w;
+    }
+    // Box-filter radius ≈ half the short side: gives every foreground
+    // pixel access to bg samples even when the head fills the frame.
+    const bgR = Math.max(8, Math.round(Math.min(bgW, bgH) / 2));
+    boxFilter(rBuf, rBuf, bgW, bgH, bgR);
+    boxFilter(gBuf, gBuf, bgW, bgH, bgR);
+    boxFilter(bBuf, bBuf, bgW, bgH, bgR);
+    boxFilter(wBuf, wBuf, bgW, bgH, bgR);
+    // Pack interpolated local-bg color into an RGBA image and upsample to
+    // full res so we can index it directly in the per-pixel matting loop.
+    const lbImg = new ImageData(bgW, bgH);
+    let globalR = 244, globalG = 244, globalB = 244, gn = 0;
+    for (let j = 0; j < bgN; j++) {
+      const w = wBuf[j];
+      if (w > 1e-6) {
+        const r = rBuf[j] / w, g = gBuf[j] / w, b = bBuf[j] / w;
+        lbImg.data[j * 4]     = r | 0;
+        lbImg.data[j * 4 + 1] = g | 0;
+        lbImg.data[j * 4 + 2] = b | 0;
+        lbImg.data[j * 4 + 3] = 255;
+        globalR = (globalR * gn + r) / (gn + 1);
+        globalG = (globalG * gn + g) / (gn + 1);
+        globalB = (globalB * gn + b) / (gn + 1);
+        gn++;
+      } else {
+        lbImg.data[j * 4]     = 244;
+        lbImg.data[j * 4 + 1] = 244;
+        lbImg.data[j * 4 + 2] = 244;
+        lbImg.data[j * 4 + 3] = 255;
       }
     }
-    const oldR = bn ? br  / bn : 244;
-    const oldG = bn ? bg_ / bn : 244;
-    const oldB = bn ? bb  / bn : 244;
+    const lbCv = new OffscreenCanvas(bgW, bgH);
+    lbCv.getContext("2d").putImageData(lbImg, 0, 0);
+    const lbUp = new OffscreenCanvas(W, H);
+    const lbUctx = lbUp.getContext("2d", { willReadFrequently: true });
+    lbUctx.imageSmoothingEnabled = true;
+    lbUctx.imageSmoothingQuality = "high";
+    lbUctx.drawImage(lbCv, 0, 0, W, H);
+    const bgField = lbUctx.getImageData(0, 0, W, H).data;
 
     // Match the replacement background's brightness to the original so it
     // blends with whatever lighting the subject was shot in. Only cap at
     // the bright end (so we never produce a darker-than-original bg) and
     // apply a low floor to avoid pitch black on extreme cases. Neutral
     // gray (R=G=B) avoids introducing a colour cast.
-    const oldLuma = 0.2126 * oldR + 0.7152 * oldG + 0.0722 * oldB;
+    const oldLuma = 0.2126 * globalR + 0.7152 * globalG + 0.0722 * globalB;
     const newLuma = Math.max(160, Math.min(250, oldLuma));
     const NEW_R = newLuma | 0, NEW_G = newLuma | 0, NEW_B = newLuma | 0;
 
@@ -683,6 +874,8 @@ async function fixBackground() {
     // We then composite the recovered fg onto the new background using α.
     // This pulls the dark/coloured halo *out* of the edge pixels instead of
     // blending it into the new white, eliminating the "obvious blur" look.
+    // `oldBg` is sampled from the local bg color field, not one global
+    // average, so warm walls and cool windows decontaminate correctly.
     const out = new ImageData(W, H);
     const od  = out.data;
     for (let i = 0; i < N; i += 4) {
@@ -695,6 +888,7 @@ async function fixBackground() {
         od[i] = sdata[i]; od[i + 1] = sdata[i + 1]; od[i + 2] = sdata[i + 2]; od[i + 3] = 255;
         continue;
       }
+      const oldR = bgField[i], oldG = bgField[i + 1], oldB = bgField[i + 2];
       const ia = 1 - a;
       const fr = (sdata[i]     - ia * oldR) / a;
       const fg = (sdata[i + 1] - ia * oldG) / a;
