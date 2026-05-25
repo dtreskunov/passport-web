@@ -145,7 +145,14 @@ async function enterCamera() {
   cameraHint.hidden = false;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user" },
+      video: {
+        facingMode: "user",
+        // Ask for the device's max sensor resolution; the browser falls back
+        // to the closest supported mode. Without any hint we typically get a
+        // 640x480 default, which produces a noticeably low-res capture.
+        width:  { ideal: 4096 },
+        height: { ideal: 4096 },
+      },
       audio: false,
     });
     video.srcObject = stream;
@@ -323,13 +330,20 @@ function computePlan() {
   let s = tooSmall ? Math.min(W, H) : cropSize;
 
   // Recenter on face/eye line *after* size clamp so the box stays centered.
-  let x = Math.round(faceX - s / 2);
-  let y = Math.round(eyeY - (1 - eyeFrac) * s);
-  let shifted = false;
-  if (x < 0)      { x = 0;     shifted = true; }
-  if (y < 0)      { y = 0;     shifted = true; }
-  if (x + s > W)  { x = W - s; shifted = true; }
-  if (y + s > H)  { y = H - s; shifted = true; }
+  const wantX = Math.round(faceX - s / 2);
+  const wantY = Math.round(eyeY - (1 - eyeFrac) * s);
+  let x = wantX, y = wantY;
+  const lack = { above: false, below: false, left: false, right: false };
+  if (x < 0)      { x = 0;     lack.left  = true; }
+  if (y < 0)      { y = 0;     lack.above = true; }
+  if (x + s > W)  { x = W - s; lack.right = true; }
+  if (y + s > H)  { y = H - s; lack.below = true; }
+  // tooSmall means the source can't even hold the square; treat as lacking
+  // on whichever axis is short.
+  if (tooSmall) {
+    if (H < W) { lack.above = true; lack.below = true; }
+    else       { lack.left = true;  lack.right = true; }
+  }
 
   const headRatio     = headHeight / s;
   const eyeFromBottom = (s - (eyeY - y)) / s;
@@ -343,8 +357,13 @@ function computePlan() {
     headRatio, eyeFromBottom,
   };
 
-  if (tooSmall || shifted || headBad || eyeBad) {
-    setStatus("Not enough room for a passport-spec crop \u2014 retake with more space around your head.", "warn");
+  const dirs = [];
+  if (lack.above) dirs.push("above");
+  if (lack.below) dirs.push("below");
+  if (lack.left || lack.right) dirs.push("beside");
+  if (dirs.length || headBad || eyeBad) {
+    const where = dirs.length ? dirs.join(" / ") : "around";
+    setStatus(`Retake with more space ${where} your head`, "warn");
   } else {
     setStatus("");
   }
