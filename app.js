@@ -102,27 +102,41 @@ async function ensureDetector() {
 // landmarker on the scaled region, and remap landmarks back to canvas coords.
 async function detectLandmarks() {
   const lm = await ensureLandmarker();
-  let res = lm.detect(capturedCv);
+
+  // Detection runs on a downsampled copy so the main thread isn't tied up
+  // for seconds on a multi-MP frame. Landmarks come back as normalized
+  // [0,1] coords, so they still apply to the full-res captured canvas.
+  const DETECT_MAX = 1024;
+  const W = capturedCv.width, H = capturedCv.height;
+  const scale = Math.min(1, DETECT_MAX / Math.max(W, H));
+  let detectSrc = capturedCv;
+  if (scale < 1) {
+    const dw = Math.round(W * scale), dh = Math.round(H * scale);
+    detectSrc = new OffscreenCanvas(dw, dh);
+    detectSrc.getContext("2d").drawImage(capturedCv, 0, 0, dw, dh);
+  }
+
+  let res = lm.detect(detectSrc);
   if (res.faceLandmarks && res.faceLandmarks.length) return res.faceLandmarks[0];
 
   const det = await ensureDetector();
-  const dres = det.detect(capturedCv);
+  const dres = det.detect(detectSrc);
   const box = dres?.detections?.[0]?.boundingBox;
   if (!box) return null;
 
-  const W = capturedCv.width, H = capturedCv.height;
-  const cx = box.originX + box.width / 2;
-  const cy = box.originY + box.height / 2;
+  // BlazeFace box is in detectSrc pixel space; map back to capturedCv coords.
+  const cx = (box.originX + box.width  / 2) / scale;
+  const cy = (box.originY + box.height / 2) / scale;
   // Pad to ~3.5× face height so the mesh has hair / chin / shoulders context.
-  const pad = Math.max(box.width, box.height) * 3.5;
+  const pad = Math.max(box.width, box.height) / scale * 3.5;
   let sx = Math.max(0, Math.round(cx - pad / 2));
   let sy = Math.max(0, Math.round(cy - pad / 2));
   let sw = Math.min(W - sx, Math.round(pad));
   let sh = Math.min(H - sy, Math.round(pad));
 
   const TARGET = 1024;
-  const scale = TARGET / Math.max(sw, sh);
-  const dw = Math.round(sw * scale), dh = Math.round(sh * scale);
+  const cropScale = TARGET / Math.max(sw, sh);
+  const dw = Math.round(sw * cropScale), dh = Math.round(sh * cropScale);
   const crop = new OffscreenCanvas(dw, dh);
   crop.getContext("2d").drawImage(capturedCv, sx, sy, sw, sh, 0, 0, dw, dh);
 
