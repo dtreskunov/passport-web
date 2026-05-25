@@ -2,65 +2,66 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <base href="./" />
-  <title>Passport Photo — web</title>
+  <title>Passport Photo</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
-    <h1>Passport Photo</h1>
-    <p class="sub">Takes a square US-passport-spec crop from your webcam. Runs entirely in your browser; nothing is uploaded.</p>
-  </header>
-
-  <main>
-    <section class="stage">
-      <div id="liveWrap" class="frameWrap">
-        <video id="video" autoplay playsinline muted></video>
-        <div id="liveOverlay" class="overlay"></div>
+  <!-- Welcome -->
+  <section id="welcome" class="screen">
+    <div class="hero">
+      <h1>Passport Photo</h1>
+      <p class="tag">A US-passport-spec square crop, made in your browser.</p>
+      <ol class="intro">
+        <li>Plain light background, even lighting.</li>
+        <li>Face the camera straight on, neutral expression.</li>
+        <li>No glasses or head covering (unless religious).</li>
+      </ol>
+      <div class="hero-actions">
+        <button id="useCameraBtn" class="big primary">Use camera</button>
+        <button id="useUploadBtn" class="big secondary">Upload photo</button>
+        <input id="fileInput" type="file" accept="image/*" hidden />
       </div>
-      <canvas id="captured" class="frameWrap" hidden></canvas>
-      <canvas id="overlay" class="overlay" hidden></canvas>
+      <p class="footnote">Runs entirely in your browser; nothing is uploaded.</p>
+    </div>
+  </section>
 
-      <div class="controls">
-        <button id="startBtn">Start camera</button>
-        <button id="captureBtn" disabled>Capture</button>
-        <button id="redoBtn" disabled>Retake</button>
-        <button id="downloadBtn" disabled>Download crop</button>
+  <!-- Camera -->
+  <section id="camera" class="screen camera-screen" hidden>
+    <video id="video" autoplay playsinline muted></video>
+    <div id="cameraTap" class="tap-target">
+      <div id="countdown" class="countdown" hidden></div>
+    </div>
+    <div class="topbar">
+      <button id="cameraBackBtn" class="iconbtn" aria-label="Back">✕</button>
+    </div>
+    <p id="cameraHint" class="hint">Tap anywhere to start 3-second timer</p>
+  </section>
+
+  <!-- Result -->
+  <section id="result" class="screen result-screen" hidden>
+    <div class="topbar">
+      <button id="resultBackBtn" class="iconbtn" aria-label="Back">✕</button>
+    </div>
+    <div class="result-stage">
+      <canvas id="captured"></canvas>
+      <canvas id="overlay" class="overlay"></canvas>
+    </div>
+    <div class="bottombar">
+      <p id="status" class="status"></p>
+      <div class="actions">
+        <button id="redoBtn" class="big secondary">Retake</button>
+        <button id="downloadBtn" class="big primary" disabled>Download</button>
       </div>
-      <p id="status" class="status">Click "Start camera" to begin.</p>
-    </section>
-
-    <aside class="panel">
-      <h2>Targets</h2>
-      <label>Head height (% of crop)
-        <input id="headFrac" type="number" min="50" max="69" step="1" value="55" />
-      </label>
-      <label>Eye line from bottom (%)
-        <input id="eyeFrac" type="number" min="56" max="69" step="1" value="60" />
-      </label>
-      <label>Output size (px per side)
-        <input id="outSize" type="number" min="600" max="1200" step="50" value="900" />
-      </label>
-
-      <h2>US spec</h2>
-      <ul class="spec">
-        <li>Square 1:1</li>
-        <li>600–1200 px per side</li>
-        <li>Head height 50–69%</li>
-        <li>Eye line 56–69% from bottom</li>
-        <li>No digital alteration beyond cropping</li>
-      </ul>
-
-      <h2>Tips</h2>
-      <ul class="tips">
-        <li>Plain light background</li>
-        <li>Face the camera straight on, neutral expression</li>
-        <li>Even lighting on both sides of the face</li>
-        <li>No glasses, no head covering (unless religious)</li>
-      </ul>
-    </aside>
-  </main>
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <label>Head % <input id="headFrac" type="number" min="50" max="69" step="1" value="55" /></label>
+        <label>Eye %  <input id="eyeFrac"  type="number" min="56" max="69" step="1" value="60" /></label>
+        <label>Size   <input id="outSize"  type="number" min="600" max="1200" step="50" value="900" /></label>
+      </details>
+    </div>
+  </section>
 
   <script type="module" src="app.js"></script>
 </body>
