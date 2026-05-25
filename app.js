@@ -542,9 +542,9 @@ function computePlan() {
 
 // ── Background detection / fix ─────────────────────────────────────────────
 // US passport spec calls for a plain white or off-white background with no
-// patterns or shadows. We sample the upper corners of the crop (almost
-// always above the head, so reliably background) and flag the photo when the
-// area is too dark or too non-uniform.
+// patterns or shadows. We sample everything in the crop except an expanded
+// face/head/shoulders region (anything left should be pure background) and
+// flag the photo when the area isn't uniform.
 function checkBackground() {
   if (!plan || !capturedCv.width) return { ok: true, mean: 255, std: 0 };
   const SAMPLE = 128;
@@ -556,26 +556,36 @@ function checkBackground() {
     0, 0, SAMPLE, SAMPLE,
   );
   const data = ctx.getImageData(0, 0, SAMPLE, SAMPLE).data;
-  const CORNER = Math.floor(SAMPLE * 0.25);
+
+  // Build an exclusion box (in SAMPLE pixel coords) around the head/torso.
+  // Expand the face bbox generously: enough to cover hair, ears, and the
+  // shoulders that extend below the chin.
+  const sx = (plan.bboxX - plan.x) / plan.size * SAMPLE;
+  const sy = (plan.bboxY - plan.y) / plan.size * SAMPLE;
+  const sw = plan.bboxW / plan.size * SAMPLE;
+  const sh = plan.bboxH / plan.size * SAMPLE;
+  const exL = sx - sw * 0.45;
+  const exR = sx + sw * 1.45;
+  const exT = sy - sh * 0.45;
+  const exB = SAMPLE;   // everything below the forehead-line is body / not bg
+
   let sumY = 0, sumY2 = 0, n = 0;
-  for (let y = 0; y < CORNER; y++) {
-    for (let x = 0; x < CORNER; x++) {
-      for (const xi of [x, SAMPLE - 1 - x]) {
-        const i = (y * SAMPLE + xi) * 4;
-        const Y = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-        sumY  += Y;
-        sumY2 += Y * Y;
-        n++;
-      }
+  for (let y = 0; y < SAMPLE; y++) {
+    for (let x = 0; x < SAMPLE; x++) {
+      if (x >= exL && x <= exR && y >= exT && y <= exB) continue;
+      const i = (y * SAMPLE + x) * 4;
+      const Y = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      sumY  += Y;
+      sumY2 += Y * Y;
+      n++;
     }
   }
-  if (n === 0) return { ok: true, mean: 255, std: 0 };
+  if (n < 32) return { ok: true, mean: 255, std: 0 };
   const mean = sumY / n;
   const std  = Math.sqrt(Math.max(0, sumY2 / n - mean * mean));
   // Spec really only cares about uniformity — a plain wall of any tone is
   // fine, and the fix step would just neutralize the brightness anyway.
-  // Stay lenient on the mean (some lighting gradient is acceptable) but
-  // strict on std so patterns / objects / hard shadows still flag.
+  // Strict on std so patterns / objects / hard shadows still flag.
   const ok = std <= 30;
   return { ok, mean, std };
 }
