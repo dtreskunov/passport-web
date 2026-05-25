@@ -589,53 +589,90 @@ async function fixBackground() {
     const small = new OffscreenCanvas(SEG, SEG);
     small.getContext("2d").drawImage(capturedCv, 0, 0, SEG, SEG);
     const result = seg.segment(small);
-    // Confidence mask 0 is the background-probability channel. Using the
-    // float confidence (not the hard category) gives a soft alpha that
-    // feathers naturally at hair / shoulder edges.
     const bgMask = result.confidenceMasks[0];
     const bgArr  = bgMask.getAsFloat32Array();
     const mw = bgMask.width, mh = bgMask.height;
 
+    // Stash mask alpha (= 1 - P(background)) as an RGBA canvas so the
+    // browser can bilinearly upscale it to the photo's native resolution.
     const maskCv = new OffscreenCanvas(mw, mh);
     const mctx = maskCv.getContext("2d");
-    const imgData = mctx.createImageData(mw, mh);
+    const mImg = mctx.createImageData(mw, mh);
     for (let i = 0; i < bgArr.length; i++) {
-      // Person alpha = 1 - P(background). Apply a gentle bias so mid-range
-      // edge pixels stay translucent (smooth blend) without ghosting.
-      const a = Math.round(255 * Math.max(0, Math.min(1, 1 - bgArr[i])));
-      imgData.data[i * 4 + 3] = a;
+      mImg.data[i * 4 + 3] = Math.round(255 * Math.max(0, Math.min(1, 1 - bgArr[i])));
     }
-    mctx.putImageData(imgData, 0, 0);
+    mctx.putImageData(mImg, 0, 0);
     for (const m of result.confidenceMasks) m.close?.();
     result.close?.();
 
-    // Upscale the 256-pixel mask to full resolution and blur it slightly
-    // so the residual blockiness of the low-res mask doesn't show through
-    // as a hard fringe. Blur radius scales with output size.
+    // Upscale to full resolution with a tiny blur to round off the 256-px
+    // grid. The blur is intentionally minimal now that matting (below)
+    // does the heavy lifting for natural-looking edges.
     const upMask = new OffscreenCanvas(W, H);
-    const uctx = upMask.getContext("2d");
+    const uctx = upMask.getContext("2d", { willReadFrequently: true });
     uctx.imageSmoothingEnabled = true;
     uctx.imageSmoothingQuality = "high";
-    uctx.filter = `blur(${Math.max(1, Math.round(W / 320))}px)`;
+    uctx.filter = `blur(${Math.max(1, Math.round(W / 600))}px)`;
     uctx.drawImage(maskCv, 0, 0, W, H);
     uctx.filter = "none";
+    const upAlpha = uctx.getImageData(0, 0, W, H).data;
 
-    // Clip the original image by the soft mask, then layer onto off-white.
-    // Pure #fff reads as cut-out / artificial; #f4f4f4 (very light gray) is
-    // within US passport spec (plain white or off-white) and blends better.
-    const person = new OffscreenCanvas(W, H);
-    const pctx = person.getContext("2d");
-    pctx.drawImage(capturedBitmap, 0, 0, W, H);
-    pctx.globalCompositeOperation = "destination-in";
-    pctx.drawImage(upMask, 0, 0);
+    // Pull the photo at full resolution.
+    const srcCv = new OffscreenCanvas(W, H);
+    const sctx = srcCv.getContext("2d", { willReadFrequently: true });
+    sctx.drawImage(capturedBitmap, 0, 0, W, H);
+    const sdata = sctx.getImageData(0, 0, W, H).data;
+    const N = sdata.length;
 
-    const out = new OffscreenCanvas(W, H);
-    const octx = out.getContext("2d");
-    octx.fillStyle = "#f4f4f4";
-    octx.fillRect(0, 0, W, H);
-    octx.drawImage(person, 0, 0);
+    // Estimate the *old* background color by averaging pixels the mask
+    // says are definitely background (alpha < ~3%). That color is what's
+    // currently contaminating the edge pixels of the person.
+    let br = 0, bg_ = 0, bb = 0, bn = 0;
+    for (let i = 0; i < N; i += 16) {        // every 4th pixel is plenty
+      if (upAlpha[i + 3] < 8) {
+        br += sdata[i]; bg_ += sdata[i + 1]; bb += sdata[i + 2]; bn++;
+      }
+    }
+    const oldR = bn ? br  / bn : 128;
+    const oldG = bn ? bg_ / bn : 128;
+    const oldB = bn ? bb  / bn : 128;
 
-    const bmp = await createImageBitmap(out);
+    // Off-white replacement (within US passport spec, blends naturally).
+    const NEW_R = 244, NEW_G = 244, NEW_B = 244;
+
+    // Per-pixel alpha matting:
+    //   observed = α · fg + (1 - α) · oldBg   →   fg = (observed - (1-α)·oldBg) / α
+    // We then composite the recovered fg onto the new background using α.
+    // This pulls the dark/coloured halo *out* of the edge pixels instead of
+    // blending it into the new white, eliminating the "obvious blur" look.
+    const out = new ImageData(W, H);
+    const od  = out.data;
+    for (let i = 0; i < N; i += 4) {
+      const a = upAlpha[i + 3] / 255;
+      if (a <= 0) {
+        od[i] = NEW_R; od[i + 1] = NEW_G; od[i + 2] = NEW_B; od[i + 3] = 255;
+        continue;
+      }
+      if (a >= 0.997) {
+        od[i] = sdata[i]; od[i + 1] = sdata[i + 1]; od[i + 2] = sdata[i + 2]; od[i + 3] = 255;
+        continue;
+      }
+      const ia = 1 - a;
+      const fr = (sdata[i]     - ia * oldR) / a;
+      const fg = (sdata[i + 1] - ia * oldG) / a;
+      const fb = (sdata[i + 2] - ia * oldB) / a;
+      const cr = fr < 0 ? 0 : fr > 255 ? 255 : fr;
+      const cg = fg < 0 ? 0 : fg > 255 ? 255 : fg;
+      const cb = fb < 0 ? 0 : fb > 255 ? 255 : fb;
+      od[i]     = (a * cr + ia * NEW_R) | 0;
+      od[i + 1] = (a * cg + ia * NEW_G) | 0;
+      od[i + 2] = (a * cb + ia * NEW_B) | 0;
+      od[i + 3] = 255;
+    }
+
+    const outCv = new OffscreenCanvas(W, H);
+    outCv.getContext("2d").putImageData(out, 0, 0);
+    const bmp = await createImageBitmap(outCv);
     capturedBitmap = bmp;
     capturedCv.getContext("2d").drawImage(bmp, 0, 0);
     draw();
