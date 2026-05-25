@@ -272,6 +272,13 @@ async function captureFromVideo() {
       capturedCv.height = hi.height;
       capturedCv.getContext("2d").drawImage(hi, 0, 0);
       fitOverlayToCanvas();
+      // Re-detect on the hi-res frame: takePhoto() can return a different
+      // aspect ratio than the preview stream, so normalized landmarks from
+      // the preview don't necessarily line up with the photo.
+      try {
+        const lm = await detectLandmarks();
+        if (lm) landmarks = lm;
+      } catch { /* keep preview landmarks */ }
       if (landmarks) computePlan();
       draw();
     }
