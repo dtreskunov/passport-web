@@ -7,12 +7,16 @@
 // transferred (zero-copy) on the way in; mask Float32Arrays are
 // transferred on the way out.
 
-import {
-  FaceLandmarker,
-  FaceDetector,
-  ImageSegmenter,
-  FilesetResolver,
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+// Classic worker (not a module) because MediaPipe's tasks-vision package
+// internally calls importScripts() to load its wasm loader, and that call
+// is disallowed inside module workers. We dynamic-import() the ESM bundle
+// from the classic worker — supported in all evergreen browsers.
+let FaceLandmarker, FaceDetector, ImageSegmenter, FilesetResolver;
+const visionReady = import(
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs"
+).then((m) => {
+  ({ FaceLandmarker, FaceDetector, ImageSegmenter, FilesetResolver } = m);
+});
 
 const WASM_BASE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -23,7 +27,11 @@ let detectorPromise = null;
 let segmenterPromise = null;
 
 function getFileset() {
-  if (!filesetPromise) filesetPromise = FilesetResolver.forVisionTasks(WASM_BASE);
+  if (!filesetPromise) {
+    filesetPromise = visionReady.then(() =>
+      FilesetResolver.forVisionTasks(WASM_BASE)
+    );
+  }
   return filesetPromise;
 }
 

@@ -10,7 +10,7 @@
 // per-detect work. The worker is started up-front on the welcome screen.
 
 // ── MediaPipe worker RPC ───────────────────────────────────────────────────
-const mpWorker = new Worker("worker.js", { type: "module" });
+const mpWorker = new Worker("worker.js");
 const rpcPending = new Map();
 let rpcSeq = 0;
 mpWorker.addEventListener("message", (ev) => {
