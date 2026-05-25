@@ -379,26 +379,16 @@ function clearOverlay() {
 
 function draw() {
   const ctx = overlayCv.getContext("2d");
-  ctx.clearRect(0, 0, overlayCv.width, overlayCv.height);
+  const W = overlayCv.width, H = overlayCv.height;
+  ctx.clearRect(0, 0, W, H);
   if (!plan) return;
 
-  // Crop rectangle.
-  ctx.setLineDash([10, 6]);
-  ctx.strokeStyle = "rgba(255, 215, 0, 0.95)";
-  ctx.lineWidth = Math.max(2, capturedCv.width / 400);
-  ctx.strokeRect(plan.x, plan.y, plan.size, plan.size);
-
-  // Eye line (subtle).
-  ctx.setLineDash([6, 5]);
-  ctx.lineWidth = Math.max(1, capturedCv.width / 800);
-  ctx.strokeStyle = "rgba(166, 92, 220, 0.75)";
+  // Dim everything outside the crop rectangle.
+  ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
   ctx.beginPath();
-  ctx.moveTo(plan.x, plan.eyeY);
-  ctx.lineTo(plan.x + plan.size, plan.eyeY);
-  ctx.stroke();
-
-  ctx.setLineDash([]);
-  ctx.lineWidth = 1;
+  ctx.rect(0, 0, W, H);
+  ctx.rect(plan.x, plan.y, plan.size, plan.size);
+  ctx.fill("evenodd");
 }
 
 // ── Download ───────────────────────────────────────────────────────────────
