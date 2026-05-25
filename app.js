@@ -133,8 +133,8 @@ async function ensureSegmenter() {
       delegate: "GPU",
     },
     runningMode: "IMAGE",
-    outputCategoryMask: true,
-    outputConfidenceMasks: false,
+    outputCategoryMask: false,
+    outputConfidenceMasks: true,
   });
   return segmenter;
 }
@@ -589,34 +589,49 @@ async function fixBackground() {
     const small = new OffscreenCanvas(SEG, SEG);
     small.getContext("2d").drawImage(capturedCv, 0, 0, SEG, SEG);
     const result = seg.segment(small);
-    const cat = result.categoryMask;
-    const mask = cat.getAsUint8Array();
-    const mw = cat.width, mh = cat.height;
+    // Confidence mask 0 is the background-probability channel. Using the
+    // float confidence (not the hard category) gives a soft alpha that
+    // feathers naturally at hair / shoulder edges.
+    const bgMask = result.confidenceMasks[0];
+    const bgArr  = bgMask.getAsFloat32Array();
+    const mw = bgMask.width, mh = bgMask.height;
 
-    // Build a mask canvas where alpha = 255 for person (category != 0) and
-    // 0 for background. Then upscale via canvas drawImage when compositing.
     const maskCv = new OffscreenCanvas(mw, mh);
     const mctx = maskCv.getContext("2d");
     const imgData = mctx.createImageData(mw, mh);
-    for (let i = 0; i < mask.length; i++) {
-      const j = i * 4;
-      imgData.data[j + 3] = mask[i] === 0 ? 0 : 255;
+    for (let i = 0; i < bgArr.length; i++) {
+      // Person alpha = 1 - P(background). Apply a gentle bias so mid-range
+      // edge pixels stay translucent (smooth blend) without ghosting.
+      const a = Math.round(255 * Math.max(0, Math.min(1, 1 - bgArr[i])));
+      imgData.data[i * 4 + 3] = a;
     }
     mctx.putImageData(imgData, 0, 0);
+    for (const m of result.confidenceMasks) m.close?.();
     result.close?.();
 
-    // Clip the original image by the upscaled mask, then layer on white.
+    // Upscale the 256-pixel mask to full resolution and blur it slightly
+    // so the residual blockiness of the low-res mask doesn't show through
+    // as a hard fringe. Blur radius scales with output size.
+    const upMask = new OffscreenCanvas(W, H);
+    const uctx = upMask.getContext("2d");
+    uctx.imageSmoothingEnabled = true;
+    uctx.imageSmoothingQuality = "high";
+    uctx.filter = `blur(${Math.max(1, Math.round(W / 320))}px)`;
+    uctx.drawImage(maskCv, 0, 0, W, H);
+    uctx.filter = "none";
+
+    // Clip the original image by the soft mask, then layer onto off-white.
+    // Pure #fff reads as cut-out / artificial; #f4f4f4 (very light gray) is
+    // within US passport spec (plain white or off-white) and blends better.
     const person = new OffscreenCanvas(W, H);
     const pctx = person.getContext("2d");
     pctx.drawImage(capturedBitmap, 0, 0, W, H);
     pctx.globalCompositeOperation = "destination-in";
-    pctx.imageSmoothingEnabled = true;
-    pctx.imageSmoothingQuality = "high";
-    pctx.drawImage(maskCv, 0, 0, W, H);
+    pctx.drawImage(upMask, 0, 0);
 
     const out = new OffscreenCanvas(W, H);
     const octx = out.getContext("2d");
-    octx.fillStyle = "#ffffff";
+    octx.fillStyle = "#f4f4f4";
     octx.fillRect(0, 0, W, H);
     octx.drawImage(person, 0, 0);
 
