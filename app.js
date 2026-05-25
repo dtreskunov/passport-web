@@ -644,12 +644,18 @@ async function fixBackground() {
         br += sdata[i]; bg_ += sdata[i + 1]; bb += sdata[i + 2]; bn++;
       }
     }
-    const oldR = bn ? br  / bn : 128;
-    const oldG = bn ? bg_ / bn : 128;
-    const oldB = bn ? bb  / bn : 128;
+    const oldR = bn ? br  / bn : 244;
+    const oldG = bn ? bg_ / bn : 244;
+    const oldB = bn ? bb  / bn : 244;
 
-    // Off-white replacement (within US passport spec, blends naturally).
-    const NEW_R = 244, NEW_G = 244, NEW_B = 244;
+    // Match the replacement background's brightness to the original so the
+    // composite blends with the lighting on the subject, then clamp into
+    // the US passport "plain white / off-white" band (Rec.709 luma in
+    // [230, 250]) so we stay spec-compliant even if the original was dark.
+    // Neutral gray (R=G=B) avoids introducing a color cast.
+    const oldLuma = 0.2126 * oldR + 0.7152 * oldG + 0.0722 * oldB;
+    const newLuma = Math.max(230, Math.min(250, oldLuma));
+    const NEW_R = newLuma | 0, NEW_G = newLuma | 0, NEW_B = newLuma | 0;
 
     // Per-pixel alpha matting:
     //   observed = α · fg + (1 - α) · oldBg   →   fg = (observed - (1-α)·oldBg) / α
