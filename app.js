@@ -30,9 +30,11 @@ const spinnerEl     = document.getElementById("spinner");
 const redoBtn       = document.getElementById("redoBtn");
 const downloadBtn   = document.getElementById("downloadBtn");
 const statusEl      = document.getElementById("status");
-const headFracIn    = document.getElementById("headFrac");
-const eyeFracIn     = document.getElementById("eyeFrac");
-const outSizeIn     = document.getElementById("outSize");
+
+// Crop spec defaults (within US passport spec; mid of allowed bands).
+const HEAD_FRAC = 0.55;   // head height / image height
+const EYE_FRAC  = 0.60;   // eye line from bottom of image
+const OUT_SIZE  = 900;    // output side in px
 
 // ── State ──────────────────────────────────────────────────────────────────
 let landmarker = null;
@@ -283,8 +285,8 @@ function backToWelcome() {
 function computePlan() {
   if (!landmarks || !capturedBitmap) { plan = null; return; }
   const W = capturedBitmap.width, H = capturedBitmap.height;
-  const headFrac = clampNum(headFracIn.valueAsNumber, 40, 80, 55);
-  const eyeFrac  = clampNum(eyeFracIn.valueAsNumber,  40, 80, 60);
+  const headFrac = HEAD_FRAC;
+  const eyeFrac  = EYE_FRAC;
 
   let minX = 1, minY = 1, maxX = 0, maxY = 0;
   for (const p of landmarks) {
@@ -354,10 +356,6 @@ function computePlan() {
   );
 }
 
-function clampNum(v, lo, hi, dflt) {
-  const n = Number.isFinite(v) ? v : dflt;
-  return Math.min(hi, Math.max(lo, n)) / 100;
-}
 
 // ── Overlay drawing ────────────────────────────────────────────────────────
 function fitOverlayToCanvas() {
@@ -394,7 +392,7 @@ function draw() {
 // ── Download ───────────────────────────────────────────────────────────────
 function download() {
   if (!plan || !capturedBitmap) return;
-  const target = clampInt(outSizeIn.valueAsNumber, 600, 1200, 900);
+  const target = OUT_SIZE;
   const out = document.createElement("canvas");
   out.width = target;
   out.height = target;
@@ -418,10 +416,6 @@ function download() {
   }, "image/jpeg", 0.95);
 }
 
-function clampInt(v, lo, hi, dflt) {
-  if (!Number.isFinite(v)) return dflt;
-  return Math.round(Math.min(hi, Math.max(lo, v)));
-}
 
 // ── Wire up ────────────────────────────────────────────────────────────────
 useCameraBtn.addEventListener("click", enterCamera);
@@ -438,15 +432,6 @@ cameraBackBtn.addEventListener("pointerdown", e => e.stopPropagation());
 
 redoBtn.addEventListener("click", retake);
 downloadBtn.addEventListener("click", download);
-
-for (const el of [headFracIn, eyeFracIn]) {
-  el.addEventListener("change", () => {
-    if (!landmarks) return;
-    computePlan();
-    draw();
-    downloadBtn.disabled = !plan;
-  });
-}
 
 window.addEventListener("resize", () => {
   if (!resultScreen.hidden && capturedBitmap) {

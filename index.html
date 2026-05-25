@@ -41,13 +41,13 @@
 
   <!-- Result -->
   <section id="result" class="screen result-screen" hidden>
-    <div class="topbar">
-      <button id="resultBackBtn" class="iconbtn" aria-label="Back">✕</button>
-    </div>
     <div class="result-stage">
       <canvas id="captured"></canvas>
       <canvas id="overlay" class="overlay"></canvas>
       <div id="spinner" class="spinner" hidden aria-label="Detecting"></div>
+    </div>
+    <div class="topbar">
+      <button id="resultBackBtn" class="iconbtn" aria-label="Back">✕</button>
     </div>
     <div class="bottombar">
       <p id="status" class="status"></p>
@@ -55,12 +55,6 @@
         <button id="redoBtn" class="big secondary">Retake</button>
         <button id="downloadBtn" class="big primary" disabled>Download</button>
       </div>
-      <details class="advanced">
-        <summary>Advanced</summary>
-        <label>Head % <input id="headFrac" type="number" min="50" max="69" step="1" value="55" /></label>
-        <label>Eye %  <input id="eyeFrac"  type="number" min="56" max="69" step="1" value="60" /></label>
-        <label>Size   <input id="outSize"  type="number" min="600" max="1200" step="50" value="900" /></label>
-      </details>
     </div>
   </section>
 
