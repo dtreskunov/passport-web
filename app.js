@@ -606,16 +606,27 @@ async function fixBackground() {
     result.close?.();
 
     // Upscale to full resolution with a tiny blur to round off the 256-px
-    // grid. The blur is intentionally minimal now that matting (below)
-    // does the heavy lifting for natural-looking edges.
+    // grid, then sigmoid-sharpen the alpha. The blur smooths the grid
+    // staircase; the sigmoid then collapses the wide α∈(0,1) band into a
+    // 1-2 pixel anti-aliased edge. Low-confidence ghost regions (the
+    // segmenter "seeing" a partial person at the frame boundary, for
+    // example) get pushed to 0 and disappear entirely.
     const upMask = new OffscreenCanvas(W, H);
     const uctx = upMask.getContext("2d", { willReadFrequently: true });
     uctx.imageSmoothingEnabled = true;
     uctx.imageSmoothingQuality = "high";
-    uctx.filter = `blur(${Math.max(1, Math.round(W / 600))}px)`;
+    uctx.filter = `blur(${Math.max(1, Math.round(W / 800))}px)`;
     uctx.drawImage(maskCv, 0, 0, W, H);
     uctx.filter = "none";
     const upAlpha = uctx.getImageData(0, 0, W, H).data;
+    // α' = clamp((α − 0.5) · GAIN + 0.5). GAIN 6 keeps a ~16% wide soft
+    // band around the threshold, which is ~1-2 px after upsampling.
+    const GAIN = 6;
+    for (let i = 3; i < upAlpha.length; i += 4) {
+      const a = upAlpha[i] / 255;
+      const s = (a - 0.5) * GAIN + 0.5;
+      upAlpha[i] = s <= 0 ? 0 : s >= 1 ? 255 : (s * 255) | 0;
+    }
 
     // Pull the photo at full resolution.
     const srcCv = new OffscreenCanvas(W, H);
