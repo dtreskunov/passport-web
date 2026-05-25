@@ -4,13 +4,29 @@
 // UX: welcome screen → either camera (tap → 3-2-1 countdown → snap) or
 // upload → result screen with crop overlay + download.
 // Everything runs in the browser; the camera feed never leaves the page.
+//
+// MediaPipe (wasm + GPU shaders + inference) runs in a dedicated Web
+// Worker so that the main thread stays responsive during model load and
+// per-detect work. The worker is started up-front on the welcome screen.
 
-import {
-  FaceLandmarker,
-  FaceDetector,
-  ImageSegmenter,
-  FilesetResolver,
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+// ── MediaPipe worker RPC ───────────────────────────────────────────────────
+const mpWorker = new Worker("worker.js", { type: "module" });
+const rpcPending = new Map();
+let rpcSeq = 0;
+mpWorker.addEventListener("message", (ev) => {
+  const { id, ok, result, error } = ev.data;
+  const p = rpcPending.get(id);
+  if (!p) return;
+  rpcPending.delete(id);
+  if (ok) p.resolve(result); else p.reject(new Error(error));
+});
+function rpc(op, payload, transfer) {
+  const id = ++rpcSeq;
+  return new Promise((resolve, reject) => {
+    rpcPending.set(id, { resolve, reject });
+    mpWorker.postMessage({ id, op, ...payload }, transfer || []);
+  });
+}
 
 // ── DOM ────────────────────────────────────────────────────────────────────
 const welcome       = document.getElementById("welcome");
@@ -40,9 +56,7 @@ const EYE_FRAC  = 0.60;   // eye line from bottom of image (spec: 0.56 – 0.69)
 const OUT_SIZE  = 900;    // output side in px
 
 // ── State ──────────────────────────────────────────────────────────────────
-let landmarker = null;
-let detector = null;            // FaceDetector (BlazeFace) for small-face fallback
-let segmenter = null;           // ImageSegmenter for background replacement
+let warmupPromise = null;       // resolves once the worker has warmed the landmarker
 let stream = null;
 let capturedBitmap = null;     // ImageBitmap of the frozen frame
 let capturedMirrored = false;  // true when frame came from selfie video (mirrored)
@@ -85,67 +99,32 @@ function setWarning(msg) {
 }
 
 // ── MediaPipe ──────────────────────────────────────────────────────────────
-async function ensureLandmarker() {
-  if (landmarker) return landmarker;
-  const filesetResolver = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-  );
-  landmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-      delegate: "GPU",
-    },
-    runningMode: "IMAGE",
-    numFaces: 1,
-  });
-  // Warm up: first detect() pays GPU shader-compile cost (~hundreds of ms).
-  // Run it now on a dummy frame so the user-facing detect is cheap. Yield
-  // first so the wasm-init stall and the shader-compile stall don't merge
-  // into one giant freeze with no animation frame between them.
-  await new Promise(r => setTimeout(r, 0));
-  try {
-    const warm = new OffscreenCanvas(64, 64);
-    const wctx = warm.getContext("2d");
-    wctx.fillStyle = "#888";
-    wctx.fillRect(0, 0, 64, 64);
-    landmarker.detect(warm);
-  } catch { /* warm-up is best-effort */ }
-  return landmarker;
+// All MediaPipe work lives in worker.js. ensureWarm kicks off (and caches)
+// the warm-up RPC, which lazily creates the landmarker inside the worker
+// and runs a dummy detect to pay the GPU shader-compile cost. detect() and
+// segment() then call into the worker per frame, transferring an
+// ImageBitmap of the image to inspect.
+function ensureWarm() {
+  if (!warmupPromise) warmupPromise = rpc("warm");
+  return warmupPromise;
 }
 
-async function ensureDetector() {
-  if (detector) return detector;
-  const filesetResolver = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-  );
-  detector = await FaceDetector.createFromOptions(filesetResolver, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite",
-      delegate: "GPU",
-    },
-    runningMode: "IMAGE",
-  });
-  return detector;
+// Helper: convert a CanvasImageSource (canvas / OffscreenCanvas / video)
+// into an ImageBitmap that can be transferred to the worker.
+async function toBitmap(src, sx, sy, sw, sh, dw, dh) {
+  if (sx == null) return createImageBitmap(src);
+  return createImageBitmap(src, sx, sy, sw, sh, { resizeWidth: dw, resizeHeight: dh });
 }
 
-async function ensureSegmenter() {
-  if (segmenter) return segmenter;
-  const filesetResolver = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-  );
-  segmenter = await ImageSegmenter.createFromOptions(filesetResolver, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
-      delegate: "GPU",
-    },
-    runningMode: "IMAGE",
-    outputCategoryMask: false,
-    outputConfidenceMasks: true,
-  });
-  return segmenter;
+// Convert the worker's flat Float32Array of [x,y,z,…] into the
+// {x,y,z} objects the rest of the app expects.
+function unpackLandmarks(flat) {
+  if (!flat) return null;
+  const out = new Array(flat.length / 3);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = { x: flat[i * 3], y: flat[i * 3 + 1], z: flat[i * 3 + 2] };
+  }
+  return out;
 }
 
 // Run the landmarker on the captured canvas. If no face is found, use the
@@ -153,52 +132,52 @@ async function ensureSegmenter() {
 // face, crop a padded square around it, scale that region up, run the
 // landmarker on the scaled region, and remap landmarks back to canvas coords.
 async function detectLandmarks() {
-  const lm = await ensureLandmarker();
+  await ensureWarm();
 
-  // Detection runs on a downsampled copy so the main thread isn't tied up
+  // Detection runs on a downsampled copy so the worker isn't tied up
   // for seconds on a multi-MP frame. Landmarks come back as normalized
   // [0,1] coords, so they still apply to the full-res captured canvas.
   // 640 is plenty for the landmarker; larger sizes don't improve accuracy.
   const DETECT_MAX = 640;
   const W = capturedCv.width, H = capturedCv.height;
   const scale = Math.min(1, DETECT_MAX / Math.max(W, H));
-  let detectSrc = capturedCv;
-  if (scale < 1) {
-    const dw = Math.round(W * scale), dh = Math.round(H * scale);
-    detectSrc = new OffscreenCanvas(dw, dh);
-    detectSrc.getContext("2d").drawImage(capturedCv, 0, 0, dw, dh);
-  }
+  const dw0 = scale < 1 ? Math.round(W * scale) : W;
+  const dh0 = scale < 1 ? Math.round(H * scale) : H;
+  const detectBmp = await toBitmap(capturedCv, 0, 0, W, H, dw0, dh0);
 
-  let res = lm.detect(detectSrc);
-  if (res.faceLandmarks && res.faceLandmarks.length) return res.faceLandmarks[0];
+  let r = await rpc("landmarks", { bitmap: detectBmp }, [detectBmp]);
+  if (r.landmarks) return unpackLandmarks(r.landmarks);
 
-  const det = await ensureDetector();
-  const dres = det.detect(detectSrc);
-  const box = dres?.detections?.[0]?.boundingBox;
-  if (!box) return null;
+  // Fallback: BlazeFace detector → crop around the face → landmarker on the
+  // upsampled crop. Need a fresh bitmap each time because the worker closes
+  // each one after use.
+  const faceBmp = await toBitmap(capturedCv, 0, 0, W, H, dw0, dh0);
+  const dres = await rpc("face", { bitmap: faceBmp }, [faceBmp]);
+  if (!dres.box) return null;
+  const box = dres.box;
 
-  // BlazeFace box is in detectSrc pixel space; map back to capturedCv coords.
-  const cx = (box.originX + box.width  / 2) / scale;
-  const cy = (box.originY + box.height / 2) / scale;
+  // BlazeFace box is in detect-bitmap pixel space; map back to capturedCv coords.
+  const cx = (box.x + box.w / 2) / scale;
+  const cy = (box.y + box.h / 2) / scale;
   // Pad to ~3.5× face height so the mesh has hair / chin / shoulders context.
-  const pad = Math.max(box.width, box.height) / scale * 3.5;
-  let sx = Math.max(0, Math.round(cx - pad / 2));
-  let sy = Math.max(0, Math.round(cy - pad / 2));
-  let sw = Math.min(W - sx, Math.round(pad));
-  let sh = Math.min(H - sy, Math.round(pad));
+  const pad = Math.max(box.w, box.h) / scale * 3.5;
+  const sx = Math.max(0, Math.round(cx - pad / 2));
+  const sy = Math.max(0, Math.round(cy - pad / 2));
+  const sw = Math.min(W - sx, Math.round(pad));
+  const sh = Math.min(H - sy, Math.round(pad));
 
   const TARGET = 1024;
   const cropScale = TARGET / Math.max(sw, sh);
   const dw = Math.round(sw * cropScale), dh = Math.round(sh * cropScale);
-  const crop = new OffscreenCanvas(dw, dh);
-  crop.getContext("2d").drawImage(capturedCv, sx, sy, sw, sh, 0, 0, dw, dh);
+  const cropBmp = await toBitmap(capturedCv, sx, sy, sw, sh, dw, dh);
 
-  res = lm.detect(crop);
-  if (!res.faceLandmarks || !res.faceLandmarks.length) return null;
+  r = await rpc("landmarks", { bitmap: cropBmp }, [cropBmp]);
+  if (!r.landmarks) return null;
+  const pts = unpackLandmarks(r.landmarks);
 
   // Remap normalized landmarks from the cropped region back to canvas-relative
   // normalized coordinates.
-  return res.faceLandmarks[0].map(p => ({
+  return pts.map(p => ({
     x: (sx + p.x * sw) / W,
     y: (sy + p.y * sh) / H,
     z: p.z,
@@ -269,7 +248,7 @@ async function enterCamera() {
     video.srcObject = stream;
     await video.play();
     photoSettings = await pickPhotoSettings(stream.getVideoTracks()[0]);
-    ensureLandmarker().catch(() => {});  // warm the model
+    ensureWarm().catch(() => {});  // warm the model in the worker
     cameraSpinner.hidden = true;
     cameraHint.hidden = false;
   } catch (err) {
@@ -761,16 +740,11 @@ async function fixBackground() {
   const origLabel = fixBgBtn.textContent;
   fixBgBtn.textContent = "Fixing background…";
   try {
-    const seg = await ensureSegmenter();
     const W = capturedCv.width, H = capturedCv.height;
     // Segmenter's native input is 256x256; running larger doesn't help.
     const SEG = 256;
-    const small = new OffscreenCanvas(SEG, SEG);
-    small.getContext("2d").drawImage(capturedCv, 0, 0, SEG, SEG);
-    const result = seg.segment(small);
-    const bgMask = result.confidenceMasks[0];
-    const bgArr  = bgMask.getAsFloat32Array();
-    const mw = bgMask.width, mh = bgMask.height;
+    const segBmp = await toBitmap(capturedCv, 0, 0, W, H, SEG, SEG);
+    const { mask: bgArr, mw, mh } = await rpc("segment", { bitmap: segBmp }, [segBmp]);
 
     // Stash mask alpha (= 1 - P(background)) as an RGBA canvas so the
     // browser can bilinearly upscale it to the photo's native resolution.
@@ -781,8 +755,6 @@ async function fixBackground() {
       mImg.data[i * 4 + 3] = Math.round(255 * Math.max(0, Math.min(1, 1 - bgArr[i])));
     }
     mctx.putImageData(mImg, 0, 0);
-    for (const m of result.confidenceMasks) m.close?.();
-    result.close?.();
 
     // Refine the coarse 256-px mask with an edge-aware guided filter
     // (He et al. 2010), using the photo's luminance as the guide. The
@@ -1045,22 +1017,20 @@ window.addEventListener("resize", () => {
   }
 });
 
-// Pre-warm the face landmarker during the welcome screen so that by the
-// time the user reaches the camera, the heavy MediaPipe wasm compile and
-// GPU shader compile (a multi-second main-thread stall on cold start) is
-// already done. The Camera / Upload buttons are kept hidden behind a
-// spinner until the warm-up resolves — the wasm and shader compile run
-// synchronously on the main thread and there's no way to make them
-// non-blocking without moving MediaPipe into a worker, so hiding the
-// buttons during the freeze prevents tap-during-stall confusion.
+// Pre-warm the MediaPipe worker during the welcome screen so that by the
+// time the user reaches the camera, the wasm compile + GPU shader compile
+// + dummy detect (which collectively take a couple of seconds on cold
+// start) are already done off the main thread. The Camera / Upload
+// buttons stay hidden behind a small spinner until the warm-up resolves
+// so the user doesn't try to interact while the model is still loading.
 //
 // We chain two rAFs before kicking off the load: the first commits the
 // initial paint (welcome screen + spinner visible), the second yields
-// one more frame so the spinner animation has started before the main
-// thread gets blocked by wasm parsing.
+// one more frame so the spinner animation has started before the worker
+// begins streaming wasm.
 const welcomeSpinner = document.getElementById("welcomeSpinner");
 function startWarmup() {
-  ensureLandmarker().then(() => {
+  ensureWarm().then(() => {
     welcomeSpinner.hidden = true;
     useCameraBtn.hidden = false;
     useUploadBtn.hidden = false;
