@@ -163,7 +163,7 @@ async function enterCamera() {
     // ImageCapture.takePhoto() below. This keeps the live stream cheap.
     const dpr = window.devicePixelRatio || 1;
     const previewIdeal = Math.min(
-      1920,
+      960,
       Math.round(Math.max(window.innerWidth, window.innerHeight) * dpr),
     );
     stream = await navigator.mediaDevices.getUserMedia({
@@ -223,36 +223,64 @@ function startCountdown() {
   tick();
 }
 
-async function captureFromVideo() {
-  if (!video.videoWidth) return;
-
-  // Try ImageCapture.takePhoto() first — it returns a Blob at the camera's
-  // photo resolution (often well above the preview stream resolution). Falls
-  // back to grabbing the current video frame on browsers without support
-  // (Firefox / Safari).
-  let src = null;
-  const track = stream?.getVideoTracks?.()[0];
-  if (track && "ImageCapture" in window) {
-    try {
-      const ic = new ImageCapture(track);
-      const blob = await ic.takePhoto();
-      src = await createImageBitmap(blob);
-    } catch { /* fall through */ }
-  }
-  if (!src) src = await createImageBitmap(video);
-
+async function mirrorBitmap(src) {
   const w = src.width, h = src.height;
   const off = new OffscreenCanvas(w, h);
   const octx = off.getContext("2d");
-  // Mirror to match what the user sees on screen.
   octx.translate(w, 0);
   octx.scale(-1, 1);
   octx.drawImage(src, 0, 0, w, h);
-  capturedBitmap = await createImageBitmap(off);
+  return await createImageBitmap(off);
+}
+
+let captureId = 0;  // invalidates in-flight hi-res swaps after retake/back
+
+async function captureFromVideo() {
+  if (!video.videoWidth) return;
+  const myId = ++captureId;
+  const myStream = stream;  // snapshot so retake doesn't kill the new stream
+
+  // 1. Grab the current low-res preview frame and run detection on it
+  //    immediately so the user sees a result quickly.
+  const previewBmp = await createImageBitmap(video);
+  capturedBitmap = await mirrorBitmap(previewBmp);
   capturedMirrored = true;
-  stopCamera();
   cameFrom = "camera";
-  await goToResult();
+
+  // 2. Kick off the high-res photo capture in parallel; swap it in once
+  //    ready. Landmarks are normalized [0,1] so they remain valid.
+  const hiResPromise = (async () => {
+    const track = myStream?.getVideoTracks?.()[0];
+    if (!track || !("ImageCapture" in window)) return null;
+    try {
+      const ic = new ImageCapture(track);
+      const blob = await ic.takePhoto();
+      const bmp = await createImageBitmap(blob);
+      return await mirrorBitmap(bmp);
+    } catch {
+      return null;
+    }
+  })();
+
+  await goToResult();  // detection runs on the low-res frame
+
+  const hi = await hiResPromise;
+  if (myId === captureId) {
+    if (hi) {
+      capturedBitmap = hi;
+      capturedCv.width  = hi.width;
+      capturedCv.height = hi.height;
+      capturedCv.getContext("2d").drawImage(hi, 0, 0);
+      fitOverlayToCanvas();
+      if (landmarks) computePlan();
+      draw();
+    }
+    // Only stop the stream we owned; a retake may have started a new one.
+    if (myStream) {
+      for (const t of myStream.getTracks()) t.stop();
+      if (stream === myStream) { stream = null; video.srcObject = null; }
+    }
+  }
 }
 
 // ── Upload ─────────────────────────────────────────────────────────────────
@@ -303,6 +331,7 @@ async function goToResult() {
 
 function retake() {
   cancelCountdown();
+  captureId++;  // invalidate any in-flight hi-res swap from the prior shot
   plan = null; landmarks = null; capturedBitmap = null;
   clearOverlay();
   if (cameFrom === "camera") {
@@ -314,6 +343,7 @@ function retake() {
 
 function backToWelcome() {
   cancelCountdown();
+  captureId++;
   stopCamera();
   plan = null; landmarks = null; capturedBitmap = null;
   show("welcome");
