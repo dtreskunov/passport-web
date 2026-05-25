@@ -66,14 +66,19 @@ function setStatus(msg, level = "") {
   statusEl.hidden = !msg;
 }
 
-// Warning is surfaced on the Retake button itself: "Retake" by default,
-// or the warning text in warn color when the crop is out of spec.
+function defaultRetakeLabel() {
+  return cameFrom === "upload" ? "Choose a different image" : "Retake";
+}
+
+// Warning is surfaced on the Retake button itself: the default label
+// ("Retake" / "Choose a different image") by default, or the warning text
+// in warn color when the crop is out of spec.
 function setWarning(msg) {
   if (msg) {
     redoBtn.textContent = msg;
     redoBtn.classList.add("warn");
   } else {
-    redoBtn.textContent = "Retake";
+    redoBtn.textContent = defaultRetakeLabel();
     redoBtn.classList.remove("warn");
   }
 }
@@ -429,6 +434,8 @@ function retake() {
   clearOverlay();
   if (cameFrom === "camera") {
     enterCamera();
+  } else if (cameFrom === "upload") {
+    fileInput.click();
   } else {
     show("welcome");
   }
@@ -565,10 +572,11 @@ function checkBackground() {
   if (n === 0) return { ok: true, mean: 255, std: 0 };
   const mean = sumY / n;
   const std  = Math.sqrt(Math.max(0, sumY2 / n - mean * mean));
-  // Permissive on brightness (subjects shot in dim rooms have darker but
-  // still acceptable backgrounds); strict on uniformity (patterns /
-  // shadows / objects raise the variance).
-  const ok = mean >= 160 && std <= 22;
+  // Spec really only cares about uniformity — a plain wall of any tone is
+  // fine, and the fix step would just neutralize the brightness anyway.
+  // Stay lenient on the mean (some lighting gradient is acceptable) but
+  // strict on std so patterns / objects / hard shadows still flag.
+  const ok = std <= 30;
   return { ok, mean, std };
 }
 
