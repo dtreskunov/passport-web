@@ -34,8 +34,8 @@ const downloadBtn   = document.getElementById("downloadBtn");
 const statusEl      = document.getElementById("status");
 
 // Crop spec defaults (within US passport spec; mid of allowed bands).
-const HEAD_FRAC = 0.55;   // head height / image height
-const EYE_FRAC  = 0.60;   // eye line from bottom of image
+const HEAD_FRAC = 0.62;   // head height / image height (spec: 0.50 – 0.69)
+const EYE_FRAC  = 0.60;   // eye line from bottom of image (spec: 0.56 – 0.69)
 const OUT_SIZE  = 900;    // output side in px
 
 // ── State ──────────────────────────────────────────────────────────────────
