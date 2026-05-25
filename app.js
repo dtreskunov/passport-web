@@ -26,6 +26,7 @@ const cameraBackBtn = document.getElementById("cameraBackBtn");
 const resultBackBtn = document.getElementById("resultBackBtn");
 const capturedCv    = document.getElementById("captured");
 const overlayCv     = document.getElementById("overlay");
+const spinnerEl     = document.getElementById("spinner");
 const redoBtn       = document.getElementById("redoBtn");
 const downloadBtn   = document.getElementById("downloadBtn");
 const statusEl      = document.getElementById("status");
@@ -236,7 +237,8 @@ async function goToResult() {
   capturedCv.height = capturedBitmap.height;
   capturedCv.getContext("2d").drawImage(capturedBitmap, 0, 0);
   fitOverlayToCanvas();
-  setStatus("Detecting…");
+  setStatus("");
+  spinnerEl.hidden = false;
   downloadBtn.disabled = true;
   plan = null; landmarks = null;
   clearOverlay();
@@ -251,6 +253,7 @@ async function goToResult() {
   } catch (err) {
     setStatus("Detection failed: " + err.message, "err");
   }
+  spinnerEl.hidden = true;
   downloadBtn.disabled = !plan;
   draw();
 }
