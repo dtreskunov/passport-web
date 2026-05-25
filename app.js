@@ -22,6 +22,7 @@ const fileInput     = document.getElementById("fileInput");
 const video         = document.getElementById("video");
 const cameraTap     = document.getElementById("cameraTap");
 const cameraHint    = document.getElementById("cameraHint");
+const cameraSpinner = document.getElementById("cameraSpinner");
 const countdownEl   = document.getElementById("countdown");
 const cameraBackBtn = document.getElementById("cameraBackBtn");
 const resultBackBtn = document.getElementById("resultBackBtn");
@@ -238,7 +239,13 @@ async function pickPhotoSettings(track) {
 async function enterCamera() {
   show("camera");
   countdownEl.hidden = true;
-  cameraHint.hidden = false;
+  // Hide the tap-to-start hint until the stream is actually ready —
+  // otherwise the first tap arrives before getUserMedia resolves and
+  // gets silently dropped by startCountdown's `!stream` guard, which
+  // feels like a long latency before the countdown appears. Show a
+  // spinner in the meantime so the user knows something is happening.
+  cameraHint.hidden = true;
+  cameraSpinner.hidden = false;
   try {
     // Preview track only needs to look sharp at the current viewport; the
     // still photo is grabbed at the camera's native sensor resolution via
@@ -260,7 +267,10 @@ async function enterCamera() {
     await video.play();
     photoSettings = await pickPhotoSettings(stream.getVideoTracks()[0]);
     ensureLandmarker().catch(() => {});  // warm the model
+    cameraSpinner.hidden = true;
+    cameraHint.hidden = false;
   } catch (err) {
+    cameraSpinner.hidden = true;
     alert("Camera error: " + err.message);
     show("welcome");
   }
