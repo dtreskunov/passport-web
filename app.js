@@ -53,7 +53,8 @@ const statusEl      = document.getElementById("status");
 // Crop spec defaults (within US passport spec; mid of allowed bands).
 const HEAD_FRAC = 0.62;   // head height / image height (spec: 0.50 – 0.69)
 const EYE_FRAC  = 0.60;   // eye line from bottom of image (spec: 0.56 – 0.69)
-const OUT_SIZE  = 900;    // output side in px
+const OUT_SIZE  = 1200;   // output side in px (State Dept upper bound)
+const MAX_BYTES = 240 * 1024;  // State Dept upload cap
 
 // ── State ──────────────────────────────────────────────────────────────────
 let warmupPromise = null;       // resolves once the worker has warmed the landmarker
@@ -966,7 +967,28 @@ function draw() {
 }
 
 // ── Download ───────────────────────────────────────────────────────────────
-function download() {
+function encodeJpeg(canvas, quality) {
+  return new Promise((resolve) =>
+    canvas.toBlob((b) => resolve(b), "image/jpeg", quality)
+  );
+}
+
+// Encode at OUT_SIZE and search for the highest JPEG quality whose output
+// fits under MAX_BYTES. Step down in 0.05 increments from 0.95 to 0.5;
+// if even q=0.5 is too large (very unlikely for a 1200² portrait on a
+// plain background) we still ship that file rather than fail.
+async function encodeUnderLimit(canvas) {
+  const qualities = [0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5];
+  let last = null;
+  for (const q of qualities) {
+    const blob = await encodeJpeg(canvas, q);
+    last = { blob, q };
+    if (blob.size <= MAX_BYTES) return last;
+  }
+  return last;
+}
+
+async function download() {
   if (!plan || !capturedBitmap) return;
   const target = OUT_SIZE;
   const out = document.createElement("canvas");
@@ -980,16 +1002,15 @@ function download() {
     plan.x, plan.y, plan.size, plan.size,
     0, 0, target, target
   );
-  out.toBlob(blob => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `passport_${target}x${target}.jpg`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  }, "image/jpeg", 0.95);
+  const { blob } = await encodeUnderLimit(out);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `passport_${target}x${target}.jpg`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 
