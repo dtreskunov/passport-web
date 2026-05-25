@@ -147,8 +147,11 @@ async function enterCamera() {
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: "user",
-        width:  { ideal: 1920 },
+        // 4:3 gives enough vertical headroom for a 1:1 passport crop.
+        // 16:9 webcam frames leave the crown too close to the top edge.
+        width:  { ideal: 1440 },
         height: { ideal: 1080 },
+        aspectRatio: { ideal: 4 / 3 },
       },
       audio: false,
     });
