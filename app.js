@@ -218,8 +218,8 @@ function backToWelcome() {
 function computePlan() {
   if (!landmarks || !capturedBitmap) { plan = null; return; }
   const W = capturedBitmap.width, H = capturedBitmap.height;
-  const headFrac = clampNum(headFracIn.valueAsNumber, 0.40, 0.80, 0.55);
-  const eyeFrac  = clampNum(eyeFracIn.valueAsNumber,  0.40, 0.80, 0.60);
+  const headFrac = clampNum(headFracIn.valueAsNumber, 40, 80, 55);
+  const eyeFrac  = clampNum(eyeFracIn.valueAsNumber,  40, 80, 60);
 
   let minX = 1, minY = 1, maxX = 0, maxY = 0;
   for (const p of landmarks) {
@@ -290,8 +290,8 @@ function computePlan() {
 }
 
 function clampNum(v, lo, hi, dflt) {
-  if (!Number.isFinite(v)) return dflt;
-  return Math.min(hi, Math.max(lo, v)) / 100;
+  const n = Number.isFinite(v) ? v : dflt;
+  return Math.min(hi, Math.max(lo, n)) / 100;
 }
 
 // ── Overlay drawing ────────────────────────────────────────────────────────
