@@ -242,6 +242,9 @@ async function goToResult() {
   downloadBtn.disabled = true;
   plan = null; landmarks = null;
   clearOverlay();
+  // Yield so the browser actually paints the spinner before we hog the main
+  // thread with the synchronous landmarker.detect() call.
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   try {
     const lm = await detectLandmarks();
     if (!lm) {
