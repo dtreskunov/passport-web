@@ -1042,6 +1042,15 @@ window.addEventListener("resize", () => {
   }
 });
 
+// Pre-warm the face landmarker during the welcome screen so that by the
+// time the user reaches the camera, the heavy MediaPipe wasm compile and
+// GPU shader compile (a multi-second main-thread stall on cold start) is
+// already done. Without this pre-warm the work runs inside enterCamera,
+// blocking the user's first tap and delaying the countdown by seconds.
+// Deferred one task tick so the welcome screen paints first.
+const idle = window.requestIdleCallback || (cb => setTimeout(cb, 50));
+idle(() => { ensureLandmarker().catch(() => {}); });
+
 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
   useCameraBtn.disabled = true;
   useCameraBtn.title = "This browser does not support camera access.";
