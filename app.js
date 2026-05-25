@@ -573,13 +573,15 @@ function boxFilter(src, dst, W, H, r) {
 // Edge-aware guided filter (He, Sun, Tang 2010). Refines a coarse value map
 // `p` using a high-resolution guide `I`; output `q` snaps to edges in I.
 // For matting, p is the coarse alpha and I is the photo's luminance.
+// Allocates five N-element Float32 buffers and reuses them through the
+// pipeline rather than nine separate ones, to keep peak memory modest.
 function guidedFilter(I, p, W, H, r, eps) {
   const N = W * H;
-  const tmp     = new Float32Array(N);
-  const meanI   = new Float32Array(N);
-  const meanP   = new Float32Array(N);
-  const corrI   = new Float32Array(N);
-  const corrIp  = new Float32Array(N);
+  const tmp    = new Float32Array(N);   // scratch → becomes q
+  const meanI  = new Float32Array(N);   // → mean_a → out scale term
+  const meanP  = new Float32Array(N);   // → mean_b → out offset term
+  const corrI  = new Float32Array(N);   // → a
+  const corrIp = new Float32Array(N);   // → b
 
   boxFilter(I, meanI, W, H, r);
   boxFilter(p, meanP, W, H, r);
@@ -588,24 +590,23 @@ function guidedFilter(I, p, W, H, r, eps) {
   for (let i = 0; i < N; i++) tmp[i] = I[i] * p[i];
   boxFilter(tmp, corrIp, W, H, r);
 
-  const a = new Float32Array(N);
-  const b = new Float32Array(N);
+  // Reuse corrI / corrIp in place for a / b.
   for (let i = 0; i < N; i++) {
     const vI    = corrI[i]  - meanI[i] * meanI[i];
     const covIp = corrIp[i] - meanI[i] * meanP[i];
-    a[i] = covIp / (vI + eps);
-    b[i] = meanP[i] - a[i] * meanI[i];
+    const a = covIp / (vI + eps);
+    corrI[i]  = a;
+    corrIp[i] = meanP[i] - a * meanI[i];
   }
-  // Reuse meanI/meanP buffers for mean_a / mean_b.
-  boxFilter(a, meanI, W, H, r);
-  boxFilter(b, meanP, W, H, r);
+  // Reuse meanI / meanP for mean_a / mean_b.
+  boxFilter(corrI,  meanI, W, H, r);
+  boxFilter(corrIp, meanP, W, H, r);
 
-  const q = new Float32Array(N);
   for (let i = 0; i < N; i++) {
     const v = meanI[i] * I[i] + meanP[i];
-    q[i] = v < 0 ? 0 : v > 1 ? 1 : v;
+    tmp[i] = v < 0 ? 0 : v > 1 ? 1 : v;
   }
-  return q;
+  return tmp;
 }
 
 // Refine a 256-pixel coarse confidence mask into a per-pixel alpha that
@@ -670,12 +671,19 @@ function refineMaskGuided(coarseMaskCv, photoCv, W, H) {
   }
   qCv.getContext("2d").putImageData(qImg, 0, 0);
 
+  // Bilinearly upsample the working-res alpha to full resolution, but
+  // pull it out as a single-channel Uint8Array (W·H bytes) rather than
+  // a full RGBA ImageData (W·H·4 bytes). On a 7 MP photo that saves
+  // ~22 MB per invocation and avoids one full-res canvas allocation.
   const upCv = new OffscreenCanvas(W, H);
   const uctx = upCv.getContext("2d", { willReadFrequently: true });
   uctx.imageSmoothingEnabled = true;
   uctx.imageSmoothingQuality = "high";
   uctx.drawImage(qCv, 0, 0, W, H);
-  return uctx.getImageData(0, 0, W, H).data;   // RGBA, alpha = refined α
+  const upRgba = uctx.getImageData(0, 0, W, H).data;
+  const upAlpha = new Uint8Array(W * H);
+  for (let i = 3, k = 0; k < upAlpha.length; i += 4, k++) upAlpha[k] = upRgba[i];
+  return upAlpha;
 }
 
 // US passport spec calls for a plain white or off-white background with no
@@ -769,27 +777,30 @@ async function fixBackground() {
     // photo instead of the soft bilinear-upsample blur that produced the
     // visible halo, and low-confidence ghost regions vanish into the
     // background mean without needing a separate sigmoid hardening pass.
+    // Returns a single-channel Uint8Array(W·H), not RGBA.
     const upAlpha = refineMaskGuided(maskCv, capturedCv, W, H);
 
-    // Pull the photo at full resolution.
-    const srcCv = new OffscreenCanvas(W, H);
-    const sctx = srcCv.getContext("2d", { willReadFrequently: true });
-    sctx.drawImage(capturedBitmap, 0, 0, W, H);
-    const sdata = sctx.getImageData(0, 0, W, H).data;
-    const N = sdata.length;
+    // Pull the photo at full resolution directly from capturedCv (no
+    // extra OffscreenCanvas copy — that would cost W·H·4 bytes for
+    // nothing). sdata length is W·H·4.
+    const cctx = capturedCv.getContext("2d", { willReadFrequently: true });
+    const sdata = cctx.getImageData(0, 0, W, H).data;
+    const Npx = W * H;
 
     // Estimate the *old* background as a smooth spatially-varying color
     // field instead of one global average. Real backgrounds aren't a
     // single color (warmer near a wall, cooler near a window, etc.), and
     // subtracting one global mean from edge pixels in the matting
     // equation leaves a tinted halo. We sample the photo only where the
-    // refined alpha says the pixel is definitely background, then
-    // box-filter to extend the color into the foreground region.
+    // refined alpha says definitely-background, then box-filter to
+    // extend the color into the foreground region.
     //
-    // Operate at a downsampled resolution (~150 px short side) for speed;
-    // the bg color field varies slowly so coarse is fine.
-    const bgW = Math.max(32, Math.round(W / Math.max(W, H) * 200));
-    const bgH = Math.max(32, Math.round(H / Math.max(W, H) * 200));
+    // The bg field varies slowly, so we operate at a coarse ~200-px
+    // working resolution and bilinearly sample it inline during matting
+    // — that avoids two full-resolution canvas allocations.
+    const bgScale = 200 / Math.max(W, H);
+    const bgW = Math.max(32, Math.round(W * bgScale));
+    const bgH = Math.max(32, Math.round(H * bgScale));
     const bgN = bgW * bgH;
     const bgCv = new OffscreenCanvas(bgW, bgH);
     const bgctx = bgCv.getContext("2d", { willReadFrequently: true });
@@ -797,25 +808,38 @@ async function fixBackground() {
     bgctx.imageSmoothingQuality = "high";
     bgctx.drawImage(capturedCv, 0, 0, bgW, bgH);
     const bgSrc = bgctx.getImageData(0, 0, bgW, bgH).data;
-    // Also downsample the alpha to bg grid for the mask.
-    const aCv = new OffscreenCanvas(bgW, bgH);
-    const actx = aCv.getContext("2d", { willReadFrequently: true });
-    const aFull = new ImageData(W, H);
-    for (let i = 3; i < upAlpha.length; i += 4) aFull.data[i] = upAlpha[i];
-    const aFullCv = new OffscreenCanvas(W, H);
-    aFullCv.getContext("2d").putImageData(aFull, 0, 0);
-    actx.imageSmoothingEnabled = true;
-    actx.imageSmoothingQuality = "high";
-    actx.drawImage(aFullCv, 0, 0, bgW, bgH);
-    const aLow = actx.getImageData(0, 0, bgW, bgH).data;
+
+    // Downsample the alpha to the bg grid via box-average in JS — no
+    // intermediate canvases. For each bg cell, average the upAlpha
+    // values from the photo region that maps to it.
+    const aLow = new Uint8Array(bgN);
+    {
+      const stepX = W / bgW, stepY = H / bgH;
+      for (let by = 0; by < bgH; by++) {
+        const y0 = (by * stepY) | 0;
+        const y1 = Math.min(H, (((by + 1) * stepY) | 0) + 1);
+        for (let bx = 0; bx < bgW; bx++) {
+          const x0 = (bx * stepX) | 0;
+          const x1 = Math.min(W, (((bx + 1) * stepX) | 0) + 1);
+          let sum = 0, n = 0;
+          // Skip-sample: stepping by 2 in each axis is plenty at this
+          // resolution and cuts the inner loop work by 4×.
+          for (let y = y0; y < y1; y += 2) {
+            const row = y * W;
+            for (let x = x0; x < x1; x += 2) { sum += upAlpha[row + x]; n++; }
+          }
+          aLow[by * bgW + bx] = n ? (sum / n) | 0 : 0;
+        }
+      }
+    }
 
     const rBuf = new Float32Array(bgN);
     const gBuf = new Float32Array(bgN);
     const bBuf = new Float32Array(bgN);
     const wBuf = new Float32Array(bgN);
-    for (let i = 0, j = 0; i < bgSrc.length; i += 4, j++) {
+    for (let i = 0, j = 0; j < bgN; i += 4, j++) {
       // Weight = 1 where definitely background, 0 elsewhere.
-      const w = aLow[i + 3] < 24 ? 1 : 0;
+      const w = aLow[j] < 24 ? 1 : 0;
       wBuf[j] = w;
       rBuf[j] = bgSrc[i]     * w;
       gBuf[j] = bgSrc[i + 1] * w;
@@ -828,37 +852,26 @@ async function fixBackground() {
     boxFilter(gBuf, gBuf, bgW, bgH, bgR);
     boxFilter(bBuf, bBuf, bgW, bgH, bgR);
     boxFilter(wBuf, wBuf, bgW, bgH, bgR);
-    // Pack interpolated local-bg color into an RGBA image and upsample to
-    // full res so we can index it directly in the per-pixel matting loop.
-    const lbImg = new ImageData(bgW, bgH);
+    // Resolve the per-cell local bg color and compute a global mean for
+    // brightness matching. Keep as small Float32 arrays — we'll bilinear
+    // sample these directly during the matting loop.
+    const bgFieldR = new Float32Array(bgN);
+    const bgFieldG = new Float32Array(bgN);
+    const bgFieldB = new Float32Array(bgN);
     let globalR = 244, globalG = 244, globalB = 244, gn = 0;
     for (let j = 0; j < bgN; j++) {
       const w = wBuf[j];
       if (w > 1e-6) {
         const r = rBuf[j] / w, g = gBuf[j] / w, b = bBuf[j] / w;
-        lbImg.data[j * 4]     = r | 0;
-        lbImg.data[j * 4 + 1] = g | 0;
-        lbImg.data[j * 4 + 2] = b | 0;
-        lbImg.data[j * 4 + 3] = 255;
+        bgFieldR[j] = r; bgFieldG[j] = g; bgFieldB[j] = b;
         globalR = (globalR * gn + r) / (gn + 1);
         globalG = (globalG * gn + g) / (gn + 1);
         globalB = (globalB * gn + b) / (gn + 1);
         gn++;
       } else {
-        lbImg.data[j * 4]     = 244;
-        lbImg.data[j * 4 + 1] = 244;
-        lbImg.data[j * 4 + 2] = 244;
-        lbImg.data[j * 4 + 3] = 255;
+        bgFieldR[j] = 244; bgFieldG[j] = 244; bgFieldB[j] = 244;
       }
     }
-    const lbCv = new OffscreenCanvas(bgW, bgH);
-    lbCv.getContext("2d").putImageData(lbImg, 0, 0);
-    const lbUp = new OffscreenCanvas(W, H);
-    const lbUctx = lbUp.getContext("2d", { willReadFrequently: true });
-    lbUctx.imageSmoothingEnabled = true;
-    lbUctx.imageSmoothingQuality = "high";
-    lbUctx.drawImage(lbCv, 0, 0, W, H);
-    const bgField = lbUctx.getImageData(0, 0, W, H).data;
 
     // Match the replacement background's brightness to the original so it
     // blends with whatever lighting the subject was shot in. Only cap at
@@ -874,21 +887,39 @@ async function fixBackground() {
     // We then composite the recovered fg onto the new background using α.
     // This pulls the dark/coloured halo *out* of the edge pixels instead of
     // blending it into the new white, eliminating the "obvious blur" look.
-    // `oldBg` is sampled from the local bg color field, not one global
-    // average, so warm walls and cool windows decontaminate correctly.
-    const out = new ImageData(W, H);
-    const od  = out.data;
-    for (let i = 0; i < N; i += 4) {
-      const a = upAlpha[i + 3] / 255;
+    // `oldBg` is bilinearly sampled from the low-res local bg color field
+    // (no full-res upsample needed), so warm walls and cool windows
+    // decontaminate correctly.
+    //
+    // Write the result *back into the existing capturedCv ImageData
+    // buffer* (sdata) instead of allocating a new W·H·4 ImageData —
+    // sdata is no longer needed as input after this loop. Saves ~29 MB
+    // on a 7 MP photo.
+    const sxScale = (bgW - 1) / W, syScale = (bgH - 1) / H;
+    for (let i = 0, px = 0; px < Npx; i += 4, px++) {
+      const a = upAlpha[px] / 255;
       if (a <= 0) {
-        od[i] = NEW_R; od[i + 1] = NEW_G; od[i + 2] = NEW_B; od[i + 3] = 255;
+        sdata[i] = NEW_R; sdata[i + 1] = NEW_G; sdata[i + 2] = NEW_B; sdata[i + 3] = 255;
         continue;
       }
       if (a >= 0.997) {
-        od[i] = sdata[i]; od[i + 1] = sdata[i + 1]; od[i + 2] = sdata[i + 2]; od[i + 3] = 255;
+        sdata[i + 3] = 255;
         continue;
       }
-      const oldR = bgField[i], oldG = bgField[i + 1], oldB = bgField[i + 2];
+      // Bilinear lookup in the low-res bg color field.
+      const x = px % W, y = (px / W) | 0;
+      const fx = x * sxScale, fy = y * syScale;
+      const x0 = fx | 0, y0 = fy | 0;
+      const x1 = x0 + 1 < bgW ? x0 + 1 : x0;
+      const y1 = y0 + 1 < bgH ? y0 + 1 : y0;
+      const tx = fx - x0, ty = fy - y0;
+      const i00 = y0 * bgW + x0, i10 = y0 * bgW + x1;
+      const i01 = y1 * bgW + x0, i11 = y1 * bgW + x1;
+      const w00 = (1 - tx) * (1 - ty), w10 = tx * (1 - ty);
+      const w01 = (1 - tx) * ty,       w11 = tx * ty;
+      const oldR = bgFieldR[i00] * w00 + bgFieldR[i10] * w10 + bgFieldR[i01] * w01 + bgFieldR[i11] * w11;
+      const oldG = bgFieldG[i00] * w00 + bgFieldG[i10] * w10 + bgFieldG[i01] * w01 + bgFieldG[i11] * w11;
+      const oldB = bgFieldB[i00] * w00 + bgFieldB[i10] * w10 + bgFieldB[i01] * w01 + bgFieldB[i11] * w11;
       const ia = 1 - a;
       const fr = (sdata[i]     - ia * oldR) / a;
       const fg = (sdata[i + 1] - ia * oldG) / a;
@@ -896,17 +927,20 @@ async function fixBackground() {
       const cr = fr < 0 ? 0 : fr > 255 ? 255 : fr;
       const cg = fg < 0 ? 0 : fg > 255 ? 255 : fg;
       const cb = fb < 0 ? 0 : fb > 255 ? 255 : fb;
-      od[i]     = (a * cr + ia * NEW_R) | 0;
-      od[i + 1] = (a * cg + ia * NEW_G) | 0;
-      od[i + 2] = (a * cb + ia * NEW_B) | 0;
-      od[i + 3] = 255;
+      sdata[i]     = (a * cr + ia * NEW_R) | 0;
+      sdata[i + 1] = (a * cg + ia * NEW_G) | 0;
+      sdata[i + 2] = (a * cb + ia * NEW_B) | 0;
+      sdata[i + 3] = 255;
     }
 
-    const outCv = new OffscreenCanvas(W, H);
-    outCv.getContext("2d").putImageData(out, 0, 0);
-    const bmp = await createImageBitmap(outCv);
-    capturedBitmap = bmp;
-    capturedCv.getContext("2d").drawImage(bmp, 0, 0);
+    // Write back into capturedCv directly via putImageData. Wrapping
+    // sdata in a fresh ImageData object avoids re-allocating its W·H·4
+    // buffer (the constructor adopts the typed array).
+    cctx.putImageData(new ImageData(sdata, W, H), 0, 0);
+    // Release the old captured bitmap immediately rather than waiting
+    // for GC, then take a fresh one from the updated canvas.
+    capturedBitmap.close?.();
+    capturedBitmap = await createImageBitmap(capturedCv);
     draw();
     updateBgUI();
   } catch (err) {
