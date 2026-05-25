@@ -7,6 +7,7 @@
 
 import {
   FaceLandmarker,
+  FaceDetector,
   FilesetResolver,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
@@ -34,6 +35,7 @@ const outSizeIn     = document.getElementById("outSize");
 
 // ── State ──────────────────────────────────────────────────────────────────
 let landmarker = null;
+let detector = null;            // FaceDetector (BlazeFace) for small-face fallback
 let stream = null;
 let capturedBitmap = null;     // ImageBitmap of the frozen frame
 let capturedMirrored = false;  // true when frame came from selfie video (mirrored)
@@ -73,6 +75,64 @@ async function ensureLandmarker() {
     numFaces: 1,
   });
   return landmarker;
+}
+
+async function ensureDetector() {
+  if (detector) return detector;
+  const filesetResolver = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  detector = await FaceDetector.createFromOptions(filesetResolver, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.task",
+      delegate: "GPU",
+    },
+    runningMode: "IMAGE",
+  });
+  return detector;
+}
+
+// Run the landmarker on the captured canvas. If no face is found, use the
+// BlazeFace detector (which handles smaller / further faces) to locate the
+// face, crop a padded square around it, scale that region up, run the
+// landmarker on the scaled region, and remap landmarks back to canvas coords.
+async function detectLandmarks() {
+  const lm = await ensureLandmarker();
+  let res = lm.detect(capturedCv);
+  if (res.faceLandmarks && res.faceLandmarks.length) return res.faceLandmarks[0];
+
+  const det = await ensureDetector();
+  const dres = det.detect(capturedCv);
+  const box = dres?.detections?.[0]?.boundingBox;
+  if (!box) return null;
+
+  const W = capturedCv.width, H = capturedCv.height;
+  const cx = box.originX + box.width / 2;
+  const cy = box.originY + box.height / 2;
+  // Pad to ~3.5× face height so the mesh has hair / chin / shoulders context.
+  const pad = Math.max(box.width, box.height) * 3.5;
+  let sx = Math.max(0, Math.round(cx - pad / 2));
+  let sy = Math.max(0, Math.round(cy - pad / 2));
+  let sw = Math.min(W - sx, Math.round(pad));
+  let sh = Math.min(H - sy, Math.round(pad));
+
+  const TARGET = 1024;
+  const scale = TARGET / Math.max(sw, sh);
+  const dw = Math.round(sw * scale), dh = Math.round(sh * scale);
+  const crop = new OffscreenCanvas(dw, dh);
+  crop.getContext("2d").drawImage(capturedCv, sx, sy, sw, sh, 0, 0, dw, dh);
+
+  res = lm.detect(crop);
+  if (!res.faceLandmarks || !res.faceLandmarks.length) return null;
+
+  // Remap normalized landmarks from the cropped region back to canvas-relative
+  // normalized coordinates.
+  return res.faceLandmarks[0].map(p => ({
+    x: (sx + p.x * sw) / W,
+    y: (sy + p.y * sh) / H,
+    z: p.z,
+  }));
 }
 
 // ── Camera ─────────────────────────────────────────────────────────────────
@@ -181,12 +241,11 @@ async function goToResult() {
   plan = null; landmarks = null;
   clearOverlay();
   try {
-    const lm = await ensureLandmarker();
-    const result = lm.detect(capturedCv);
-    if (!result.faceLandmarks || result.faceLandmarks.length === 0) {
+    const lm = await detectLandmarks();
+    if (!lm) {
       setStatus("No face detected. Retake with better lighting / framing.", "warn");
     } else {
-      landmarks = result.faceLandmarks[0];
+      landmarks = lm;
       computePlan();
     }
   } catch (err) {
