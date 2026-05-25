@@ -252,16 +252,16 @@ function computePlan() {
   const crownEstY  = chinY - headHeight;
 
   const cropSize = Math.round(headHeight / headFrac);
-  const eyeFromTopOfCrop = (1 - eyeFrac) * cropSize;
-  const cropY = Math.round(eyeY - eyeFromTopOfCrop);
-  const cropX = Math.round(faceX - cropSize / 2);
 
   const warnings = [];
-  let x = cropX, y = cropY, s = cropSize;
+  let s = cropSize;
   if (s > Math.min(W, H)) {
     warnings.push(`Crop ${s}px exceeds source ${W}×${H}; shrinking.`);
     s = Math.min(W, H);
   }
+  // Recenter on face/eye line *after* size clamp so the box stays centered.
+  let x = Math.round(faceX - s / 2);
+  let y = Math.round(eyeY - (1 - eyeFrac) * s);
   if (x < 0) { x = 0; warnings.push("Shifted right to fit."); }
   if (y < 0) { y = 0; warnings.push("Shifted down to fit."); }
   if (x + s > W) { x = W - s; warnings.push("Shifted left to fit."); }
