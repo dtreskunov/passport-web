@@ -269,3 +269,4 @@ button {
   color: var(--warn);
   border-color: var(--warn);
 }
+.big[hidden] { display: none; }
