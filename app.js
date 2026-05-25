@@ -77,6 +77,15 @@ async function ensureLandmarker() {
     runningMode: "IMAGE",
     numFaces: 1,
   });
+  // Warm up: first detect() pays GPU shader-compile cost (~hundreds of ms).
+  // Run it now on a dummy frame so the user-facing detect is cheap.
+  try {
+    const warm = new OffscreenCanvas(64, 64);
+    const wctx = warm.getContext("2d");
+    wctx.fillStyle = "#888";
+    wctx.fillRect(0, 0, 64, 64);
+    landmarker.detect(warm);
+  } catch { /* warm-up is best-effort */ }
   return landmarker;
 }
 
@@ -106,7 +115,8 @@ async function detectLandmarks() {
   // Detection runs on a downsampled copy so the main thread isn't tied up
   // for seconds on a multi-MP frame. Landmarks come back as normalized
   // [0,1] coords, so they still apply to the full-res captured canvas.
-  const DETECT_MAX = 1024;
+  // 640 is plenty for the landmarker; larger sizes don't improve accuracy.
+  const DETECT_MAX = 640;
   const W = capturedCv.width, H = capturedCv.height;
   const scale = Math.min(1, DETECT_MAX / Math.max(W, H));
   let detectSrc = capturedCv;
@@ -301,18 +311,23 @@ async function captureFromVideo() {
   const hi = await hiResPromise;
   if (myId === captureId) {
     if (hi) {
+      // If photoSettings was applied, the still and the preview have the
+      // same aspect ratio, so normalized landmarks from the preview are
+      // already valid for the hi-res frame — no re-detect needed. Without
+      // photoSettings the aspects can differ, so re-run detection.
+      const needsRedetect = !photoSettings
+        || Math.abs((hi.width / hi.height) - (capturedCv.width / capturedCv.height)) > 0.01;
       capturedBitmap = hi;
       capturedCv.width  = hi.width;
       capturedCv.height = hi.height;
       capturedCv.getContext("2d").drawImage(hi, 0, 0);
       fitOverlayToCanvas();
-      // Re-detect on the hi-res frame: takePhoto() can return a different
-      // aspect ratio than the preview stream, so normalized landmarks from
-      // the preview don't necessarily line up with the photo.
-      try {
-        const lm = await detectLandmarks();
-        if (lm) landmarks = lm;
-      } catch { /* keep preview landmarks */ }
+      if (needsRedetect) {
+        try {
+          const lm = await detectLandmarks();
+          if (lm) landmarks = lm;
+        } catch { /* keep preview landmarks */ }
+      }
       if (landmarks) computePlan();
       draw();
     }
@@ -463,11 +478,14 @@ function computePlan() {
     headRatio, eyeFromBottom,
   };
 
-  const dirs = [];
-  if (lack.above) dirs.push("above");
-  if (lack.below) dirs.push("below");
-  if (lack.left || lack.right) dirs.push("beside");
-  if (dirs.length || headBad || eyeBad) {
+  // Only warn when the final crop is actually outside passport spec. Edge
+  // clamping by itself isn't a problem if the resulting head/eye ratios
+  // still fall in the allowed bands.
+  if (headBad || eyeBad) {
+    const dirs = [];
+    if (lack.above) dirs.push("above");
+    if (lack.below) dirs.push("below");
+    if (lack.left || lack.right) dirs.push("beside");
     const where = dirs.length ? dirs.join(" / ") : "around";
     setStatus(`Retake with more space ${where} your head`, "warn");
   } else {
