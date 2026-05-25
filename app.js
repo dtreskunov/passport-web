@@ -158,14 +158,19 @@ async function enterCamera() {
   countdownEl.hidden = true;
   cameraHint.hidden = false;
   try {
+    // Preview track only needs to look sharp at the current viewport; the
+    // still photo is grabbed at the camera's native sensor resolution via
+    // ImageCapture.takePhoto() below. This keeps the live stream cheap.
+    const dpr = window.devicePixelRatio || 1;
+    const previewIdeal = Math.min(
+      1920,
+      Math.round(Math.max(window.innerWidth, window.innerHeight) * dpr),
+    );
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: "user",
-        // 1920 px on the long edge is plenty for a 900 px output crop
-        // and keeps the live preview smooth. Asking for the sensor max
-        // (e.g. 4K) makes the video stream choppy on most webcams.
-        width:  { ideal: 1920 },
-        height: { ideal: 1920 },
+        width:  { ideal: previewIdeal },
+        height: { ideal: previewIdeal },
       },
       audio: false,
     });
@@ -220,13 +225,29 @@ function startCountdown() {
 
 async function captureFromVideo() {
   if (!video.videoWidth) return;
-  const w = video.videoWidth, h = video.videoHeight;
+
+  // Try ImageCapture.takePhoto() first — it returns a Blob at the camera's
+  // photo resolution (often well above the preview stream resolution). Falls
+  // back to grabbing the current video frame on browsers without support
+  // (Firefox / Safari).
+  let src = null;
+  const track = stream?.getVideoTracks?.()[0];
+  if (track && "ImageCapture" in window) {
+    try {
+      const ic = new ImageCapture(track);
+      const blob = await ic.takePhoto();
+      src = await createImageBitmap(blob);
+    } catch { /* fall through */ }
+  }
+  if (!src) src = await createImageBitmap(video);
+
+  const w = src.width, h = src.height;
   const off = new OffscreenCanvas(w, h);
   const octx = off.getContext("2d");
   // Mirror to match what the user sees on screen.
   octx.translate(w, 0);
   octx.scale(-1, 1);
-  octx.drawImage(video, 0, 0, w, h);
+  octx.drawImage(src, 0, 0, w, h);
   capturedBitmap = await createImageBitmap(off);
   capturedMirrored = true;
   stopCamera();
