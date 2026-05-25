@@ -145,14 +145,7 @@ async function enterCamera() {
   cameraHint.hidden = false;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "user",
-        // 4:3 gives enough vertical headroom for a 1:1 passport crop.
-        // 16:9 webcam frames leave the crown too close to the top edge.
-        width:  { ideal: 1440 },
-        height: { ideal: 1080 },
-        aspectRatio: { ideal: 4 / 3 },
-      },
+      video: { facingMode: "user" },
       audio: false,
     });
     video.srcObject = stream;
@@ -323,54 +316,48 @@ function computePlan() {
 
   const cropSize = Math.round(headHeight / headFrac);
 
-  const warnings = [];
-  let s = cropSize;
-  if (s > Math.min(W, H)) {
-    warnings.push(`Crop ${s}px exceeds source ${W}×${H}; shrinking.`);
-    s = Math.min(W, H);
-  }
+  // Distinguish "crop had to be shrunk / shifted to fit the source" (the
+  // source frame isn't tall/wide enough for a spec crop) from "crop fits
+  // but ratios drift from spec" (recoverable by adjusting the source).
+  const tooSmall = cropSize > Math.min(W, H);
+  let s = tooSmall ? Math.min(W, H) : cropSize;
+
   // Recenter on face/eye line *after* size clamp so the box stays centered.
   let x = Math.round(faceX - s / 2);
   let y = Math.round(eyeY - (1 - eyeFrac) * s);
-  if (x < 0) { x = 0; warnings.push("Shifted right to fit."); }
-  if (y < 0) { y = 0; warnings.push("Shifted down to fit."); }
-  if (x + s > W) { x = W - s; warnings.push("Shifted left to fit."); }
-  if (y + s > H) { y = H - s; warnings.push("Shifted up to fit."); }
+  let shifted = false;
+  if (x < 0)      { x = 0;     shifted = true; }
+  if (y < 0)      { y = 0;     shifted = true; }
+  if (x + s > W)  { x = W - s; shifted = true; }
+  if (y + s > H)  { y = H - s; shifted = true; }
 
   const headRatio     = headHeight / s;
   const eyeFromBottom = (s - (eyeY - y)) / s;
-  if (headRatio < 0.50 || headRatio > 0.69)
-    warnings.push(`Head ${(headRatio * 100).toFixed(0)}% outside 50–69%.`);
-  if (eyeFromBottom < 0.56 || eyeFromBottom > 0.69)
-    warnings.push(`Eye ${(eyeFromBottom * 100).toFixed(0)}% outside 56–69%.`);
+  const headBad = headRatio < 0.50 || headRatio > 0.69;
+  const eyeBad  = eyeFromBottom < 0.56 || eyeFromBottom > 0.69;
 
   plan = {
     x, y, size: s,
     eyeY, faceX, chinY, crownEstY,
     bboxX, bboxY, bboxW, bboxH,
-    headRatio, eyeFromBottom, warnings,
+    headRatio, eyeFromBottom,
   };
 
-  const ok = warnings.length === 0;
-  setStatus(
-    `${s}×${s} • head ${(headRatio*100).toFixed(0)}% • eye ${(eyeFromBottom*100).toFixed(0)}%` +
-    (ok ? " • within spec" : " • " + warnings.join(" ")),
-    ok ? "" : "warn"
-  );
+  if (tooSmall || shifted || headBad || eyeBad) {
+    setStatus("Not enough room for a passport-spec crop \u2014 retake with more space around your head.", "warn");
+  } else {
+    setStatus("");
+  }
 }
 
 
 // ── Overlay drawing ────────────────────────────────────────────────────────
 function fitOverlayToCanvas() {
-  const stage = capturedCv.parentElement;
-  const stageRect = stage.getBoundingClientRect();
-  const capRect = capturedCv.getBoundingClientRect();
+  // Match the overlay's pixel grid to the captured canvas so we can draw the
+  // crop mask in source-pixel coordinates. CSS handles the visible sizing
+  // (object-fit: cover on both keeps them perfectly aligned).
   overlayCv.width  = capturedCv.width;
   overlayCv.height = capturedCv.height;
-  overlayCv.style.width  = capRect.width  + "px";
-  overlayCv.style.height = capRect.height + "px";
-  overlayCv.style.left   = (capRect.left - stageRect.left) + "px";
-  overlayCv.style.top    = (capRect.top  - stageRect.top)  + "px";
 }
 
 function clearOverlay() {
