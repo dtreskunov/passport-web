@@ -161,11 +161,11 @@ async function enterCamera() {
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: "user",
-        // Ask for the device's max sensor resolution; the browser falls back
-        // to the closest supported mode. Without any hint we typically get a
-        // 640x480 default, which produces a noticeably low-res capture.
-        width:  { ideal: 4096 },
-        height: { ideal: 4096 },
+        // 1920 px on the long edge is plenty for a 900 px output crop
+        // and keeps the live preview smooth. Asking for the sensor max
+        // (e.g. 4K) makes the video stream choppy on most webcams.
+        width:  { ideal: 1920 },
+        height: { ideal: 1920 },
       },
       audio: false,
     });
