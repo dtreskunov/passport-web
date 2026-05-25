@@ -100,7 +100,10 @@ async function ensureLandmarker() {
     numFaces: 1,
   });
   // Warm up: first detect() pays GPU shader-compile cost (~hundreds of ms).
-  // Run it now on a dummy frame so the user-facing detect is cheap.
+  // Run it now on a dummy frame so the user-facing detect is cheap. Yield
+  // first so the wasm-init stall and the shader-compile stall don't merge
+  // into one giant freeze with no animation frame between them.
+  await new Promise(r => setTimeout(r, 0));
   try {
     const warm = new OffscreenCanvas(64, 64);
     const wctx = warm.getContext("2d");
@@ -1045,11 +1048,31 @@ window.addEventListener("resize", () => {
 // Pre-warm the face landmarker during the welcome screen so that by the
 // time the user reaches the camera, the heavy MediaPipe wasm compile and
 // GPU shader compile (a multi-second main-thread stall on cold start) is
-// already done. Without this pre-warm the work runs inside enterCamera,
-// blocking the user's first tap and delaying the countdown by seconds.
-// Deferred one task tick so the welcome screen paints first.
-const idle = window.requestIdleCallback || (cb => setTimeout(cb, 50));
-idle(() => { ensureLandmarker().catch(() => {}); });
+// already done. The Camera / Upload buttons are kept hidden behind a
+// spinner until the warm-up resolves — the wasm and shader compile run
+// synchronously on the main thread and there's no way to make them
+// non-blocking without moving MediaPipe into a worker, so hiding the
+// buttons during the freeze prevents tap-during-stall confusion.
+//
+// We chain two rAFs before kicking off the load: the first commits the
+// initial paint (welcome screen + spinner visible), the second yields
+// one more frame so the spinner animation has started before the main
+// thread gets blocked by wasm parsing.
+const welcomeSpinner = document.getElementById("welcomeSpinner");
+function startWarmup() {
+  ensureLandmarker().then(() => {
+    welcomeSpinner.hidden = true;
+    useCameraBtn.hidden = false;
+    useUploadBtn.hidden = false;
+  }).catch(() => {
+    // Even on failure, surface the buttons so the user isn't stranded;
+    // the actual error path triggers when they try to use the camera.
+    welcomeSpinner.hidden = true;
+    useCameraBtn.hidden = false;
+    useUploadBtn.hidden = false;
+  });
+}
+requestAnimationFrame(() => requestAnimationFrame(startWarmup));
 
 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
   useCameraBtn.disabled = true;

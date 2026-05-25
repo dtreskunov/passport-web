@@ -219,6 +219,15 @@ button {
   pointer-events: none;
 }
 .spinner[hidden] { display: none; }
+.spinner.inline {
+  position: relative;
+  top: auto;
+  left: auto;
+  margin: 8px auto;
+  width: 56px;
+  height: 56px;
+  border-width: 5px;
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .bottombar {

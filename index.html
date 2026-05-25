@@ -19,8 +19,9 @@
         <li>No glasses or head covering (unless religious).</li>
       </ol>
       <div class="hero-actions">
-        <button id="useCameraBtn" class="big primary">Use camera</button>
-        <button id="useUploadBtn" class="big secondary">Upload photo</button>
+        <button id="useCameraBtn" class="big primary" hidden>Use camera</button>
+        <button id="useUploadBtn" class="big secondary" hidden>Upload photo</button>
+        <div id="welcomeSpinner" class="spinner inline" aria-label="Loading"></div>
         <input id="fileInput" type="file" accept="image/*" hidden />
       </div>
       <p class="footnote">Runs entirely in your browser; nothing is uploaded.</p>
