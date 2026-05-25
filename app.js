@@ -163,7 +163,7 @@ async function enterCamera() {
     // ImageCapture.takePhoto() below. This keeps the live stream cheap.
     const dpr = window.devicePixelRatio || 1;
     const previewIdeal = Math.min(
-      960,
+      640,
       Math.round(Math.max(window.innerWidth, window.innerHeight) * dpr),
     );
     stream = await navigator.mediaDevices.getUserMedia({
@@ -439,7 +439,7 @@ function computePlan() {
 function fitOverlayToCanvas() {
   // Match the overlay's pixel grid to the captured canvas so we can draw the
   // crop mask in source-pixel coordinates. CSS handles the visible sizing
-  // (object-fit: cover on both keeps them perfectly aligned).
+  // (object-fit: contain on both keeps them perfectly aligned).
   overlayCv.width  = capturedCv.width;
   overlayCv.height = capturedCv.height;
 }
