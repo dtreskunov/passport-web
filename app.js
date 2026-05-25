@@ -8,6 +8,7 @@
 import {
   FaceLandmarker,
   FaceDetector,
+  ImageSegmenter,
   FilesetResolver,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
@@ -28,6 +29,7 @@ const capturedCv    = document.getElementById("captured");
 const overlayCv     = document.getElementById("overlay");
 const spinnerEl     = document.getElementById("spinner");
 const redoBtn       = document.getElementById("redoBtn");
+const fixBgBtn      = document.getElementById("fixBgBtn");
 const downloadBtn   = document.getElementById("downloadBtn");
 const statusEl      = document.getElementById("status");
 
@@ -39,6 +41,7 @@ const OUT_SIZE  = 900;    // output side in px
 // ── State ──────────────────────────────────────────────────────────────────
 let landmarker = null;
 let detector = null;            // FaceDetector (BlazeFace) for small-face fallback
+let segmenter = null;           // ImageSegmenter for background replacement
 let stream = null;
 let capturedBitmap = null;     // ImageBitmap of the frozen frame
 let capturedMirrored = false;  // true when frame came from selfie video (mirrored)
@@ -116,6 +119,24 @@ async function ensureDetector() {
     runningMode: "IMAGE",
   });
   return detector;
+}
+
+async function ensureSegmenter() {
+  if (segmenter) return segmenter;
+  const filesetResolver = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  segmenter = await ImageSegmenter.createFromOptions(filesetResolver, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
+      delegate: "GPU",
+    },
+    runningMode: "IMAGE",
+    outputCategoryMask: true,
+    outputConfidenceMasks: false,
+  });
+  return segmenter;
 }
 
 // Run the landmarker on the captured canvas. If no face is found, use the
@@ -342,6 +363,7 @@ async function captureFromVideo() {
         } catch { /* keep preview landmarks */ }
       }
       if (landmarks) computePlan();
+      updateBgUI();
       draw();
     }
     // Only stop the stream we owned; a retake may have started a new one.
@@ -376,6 +398,7 @@ async function goToResult() {
   fitOverlayToCanvas();
   setStatus("");
   setWarning("");
+  fixBgBtn.hidden = true;
   spinnerEl.hidden = false;
   downloadBtn.disabled = true;
   plan = null; landmarks = null;
@@ -395,6 +418,7 @@ async function goToResult() {
   }
   spinnerEl.hidden = true;
   downloadBtn.disabled = !plan;
+  updateBgUI();
   draw();
 }
 
@@ -509,6 +533,107 @@ function computePlan() {
 }
 
 
+// ── Background detection / fix ─────────────────────────────────────────────
+// US passport spec calls for a plain white or off-white background with no
+// patterns or shadows. We sample the upper corners of the crop (almost
+// always above the head, so reliably background) and flag the photo when the
+// area is too dark or too non-uniform.
+function checkBackground() {
+  if (!plan || !capturedCv.width) return { ok: true, mean: 255, std: 0 };
+  const SAMPLE = 128;
+  const off = new OffscreenCanvas(SAMPLE, SAMPLE);
+  const ctx = off.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(
+    capturedCv,
+    plan.x, plan.y, plan.size, plan.size,
+    0, 0, SAMPLE, SAMPLE,
+  );
+  const data = ctx.getImageData(0, 0, SAMPLE, SAMPLE).data;
+  const CORNER = Math.floor(SAMPLE * 0.25);
+  let sumY = 0, sumY2 = 0, n = 0;
+  for (let y = 0; y < CORNER; y++) {
+    for (let x = 0; x < CORNER; x++) {
+      for (const xi of [x, SAMPLE - 1 - x]) {
+        const i = (y * SAMPLE + xi) * 4;
+        const Y = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+        sumY  += Y;
+        sumY2 += Y * Y;
+        n++;
+      }
+    }
+  }
+  if (n === 0) return { ok: true, mean: 255, std: 0 };
+  const mean = sumY / n;
+  const std  = Math.sqrt(Math.max(0, sumY2 / n - mean * mean));
+  const ok = mean >= 215 && std <= 22;
+  return { ok, mean, std };
+}
+
+function updateBgUI() {
+  if (!plan) { fixBgBtn.hidden = true; return; }
+  fixBgBtn.hidden = checkBackground().ok;
+}
+
+// Replace the background of the captured frame with solid white using the
+// MediaPipe selfie-multiclass segmenter (category 0 == background).
+async function fixBackground() {
+  if (!capturedBitmap) return;
+  fixBgBtn.disabled = true;
+  const origLabel = fixBgBtn.textContent;
+  fixBgBtn.textContent = "Fixing background…";
+  try {
+    const seg = await ensureSegmenter();
+    const W = capturedCv.width, H = capturedCv.height;
+    // Segmenter's native input is 256x256; running larger doesn't help.
+    const SEG = 256;
+    const small = new OffscreenCanvas(SEG, SEG);
+    small.getContext("2d").drawImage(capturedCv, 0, 0, SEG, SEG);
+    const result = seg.segment(small);
+    const cat = result.categoryMask;
+    const mask = cat.getAsUint8Array();
+    const mw = cat.width, mh = cat.height;
+
+    // Build a mask canvas where alpha = 255 for person (category != 0) and
+    // 0 for background. Then upscale via canvas drawImage when compositing.
+    const maskCv = new OffscreenCanvas(mw, mh);
+    const mctx = maskCv.getContext("2d");
+    const imgData = mctx.createImageData(mw, mh);
+    for (let i = 0; i < mask.length; i++) {
+      const j = i * 4;
+      imgData.data[j + 3] = mask[i] === 0 ? 0 : 255;
+    }
+    mctx.putImageData(imgData, 0, 0);
+    result.close?.();
+
+    // Clip the original image by the upscaled mask, then layer on white.
+    const person = new OffscreenCanvas(W, H);
+    const pctx = person.getContext("2d");
+    pctx.drawImage(capturedBitmap, 0, 0, W, H);
+    pctx.globalCompositeOperation = "destination-in";
+    pctx.imageSmoothingEnabled = true;
+    pctx.imageSmoothingQuality = "high";
+    pctx.drawImage(maskCv, 0, 0, W, H);
+
+    const out = new OffscreenCanvas(W, H);
+    const octx = out.getContext("2d");
+    octx.fillStyle = "#ffffff";
+    octx.fillRect(0, 0, W, H);
+    octx.drawImage(person, 0, 0);
+
+    const bmp = await createImageBitmap(out);
+    capturedBitmap = bmp;
+    capturedCv.getContext("2d").drawImage(bmp, 0, 0);
+    draw();
+    updateBgUI();
+  } catch (err) {
+    setStatus("Background fix failed: " + err.message, "err");
+  } finally {
+    fixBgBtn.disabled = false;
+    fixBgBtn.textContent = origLabel;
+  }
+}
+
+
 // ── Overlay drawing ────────────────────────────────────────────────────────
 function fitOverlayToCanvas() {
   // Match the overlay's pixel grid to the captured canvas so we can draw the
@@ -579,6 +704,7 @@ cameraTap.addEventListener("pointerdown", startCountdown);
 cameraBackBtn.addEventListener("pointerdown", e => e.stopPropagation());
 
 redoBtn.addEventListener("click", retake);
+fixBgBtn.addEventListener("click", fixBackground);
 downloadBtn.addEventListener("click", download);
 
 window.addEventListener("resize", () => {
