@@ -323,17 +323,17 @@ async function switchCamera(deviceId) {
   cameraSpinner.hidden = false;
   cancelCountdown();
   stopCamera();
-  // Brief yield: Firefox Android throws NotReadableError if getUserMedia
-  // is called immediately after track.stop().
-  await new Promise(r => setTimeout(r, 120));
+  // Firefox Android throws NotReadableError if getUserMedia is called
+  // immediately after track.stop(); 120 ms wasn't always enough.
+  await new Promise(r => setTimeout(r, 300));
   try {
     await openStream(deviceId);
   } catch (err) {
-    // The chosen camera couldn't be opened (busy, gone, unsupported
-    // constraints). Don't strand the user — fall back to the default
-    // camera and re-sync the dropdown so they're not stuck reselecting
-    // the bad entry on every retry.
+    // Mark the failing option so the user can see (and can't re-pick) it.
+    disableCameraOption(deviceId, err.name || "unavailable");
     alert("Could not switch camera: " + err.message);
+    // Fall back to the default camera so the user isn't stranded on the
+    // welcome screen with a stale dropdown selection.
     try {
       await openStream();
     } catch (err2) {
@@ -352,6 +352,14 @@ function syncCameraSelectToStream() {
   const id = stream?.getVideoTracks()[0]?.getSettings?.().deviceId;
   if (!id) return;
   for (const opt of cameraSelect.options) opt.selected = opt.value === id;
+}
+
+function disableCameraOption(deviceId, reason) {
+  for (const opt of cameraSelect.options) {
+    if (opt.value !== deviceId || opt.disabled) continue;
+    opt.disabled = true;
+    opt.textContent = `${opt.textContent} (${reason})`;
+  }
 }
 
 async function enterCamera() {
