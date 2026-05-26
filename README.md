@@ -9,6 +9,15 @@ No build step, no server, no upload — the camera feed and detection run
 entirely in the browser. The model file (~3 MB) is fetched from Google's CDN
 on first use.
 
+## One-time setup (per clone)
+
+Enable the cache-busting pre-commit hook so deployed asset URLs get a fresh
+`?v=` stamp on each commit (avoids the 10-min GitHub Pages browser cache):
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Run locally
 
 `getUserMedia` requires a secure context, so you need `http://localhost` or

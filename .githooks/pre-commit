@@ -1,0 +1,26 @@
+#!/bin/sh
+# Stamp a fresh build id into index.html so browsers bypass the GH Pages
+# HTTP cache after each push. Uses the staged tree's content hash so the
+# id only changes when something actually changed.
+set -e
+
+BUILD_ID=$(git write-tree | cut -c1-10)
+
+# Replace any existing ?v=XXXX query and the inline window.BUILD_ID="XXX".
+# Works with both GNU sed (Linux) and BSD sed (macOS); uses a temp file
+# instead of -i for portability with Git for Windows' busybox sed.
+stamp() {
+  f="$1"
+  tmp="$f.tmp.$$"
+  sed -e "s|?v=[A-Za-z0-9]\{1,\}|?v=$BUILD_ID|g" \
+      -e "s|window\.BUILD_ID=\"[^\"]*\"|window.BUILD_ID=\"$BUILD_ID\"|g" \
+      "$f" > "$tmp"
+  if ! cmp -s "$f" "$tmp"; then
+    mv "$tmp" "$f"
+    git add "$f"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+stamp index.html
