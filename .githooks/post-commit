@@ -7,7 +7,8 @@
 # stamping the *pre-amend* SHA. The amend produces a new SHA (the one that
 # gets pushed); the pre-amend SHA becomes dangling locally. To keep it
 # reachable on GitHub (so the /commit/<sha> link in the deployed page works),
-# we tag it `deployed-<short>` and rely on `push.followTags=true`.
+# we tag it `deployed-<short>`. The tag is pushed via a remote.origin.push
+# refspec configured per clone (see README).
 set -e
 
 # Recursion guard: our own `git commit --amend` below fires post-commit again.
