@@ -328,13 +328,30 @@ async function switchCamera(deviceId) {
   await new Promise(r => setTimeout(r, 120));
   try {
     await openStream(deviceId);
-    cameraSpinner.hidden = true;
-    cameraHint.hidden = false;
   } catch (err) {
-    cameraSpinner.hidden = true;
-    alert("Camera error: " + err.message);
-    show("welcome");
+    // The chosen camera couldn't be opened (busy, gone, unsupported
+    // constraints). Don't strand the user — fall back to the default
+    // camera and re-sync the dropdown so they're not stuck reselecting
+    // the bad entry on every retry.
+    alert("Could not switch camera: " + err.message);
+    try {
+      await openStream();
+    } catch (err2) {
+      cameraSpinner.hidden = true;
+      alert("Camera error: " + err2.message);
+      show("welcome");
+      return;
+    }
+    syncCameraSelectToStream();
   }
+  cameraSpinner.hidden = true;
+  cameraHint.hidden = false;
+}
+
+function syncCameraSelectToStream() {
+  const id = stream?.getVideoTracks()[0]?.getSettings?.().deviceId;
+  if (!id) return;
+  for (const opt of cameraSelect.options) opt.selected = opt.value === id;
 }
 
 async function enterCamera() {
