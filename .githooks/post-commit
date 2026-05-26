@@ -1,0 +1,39 @@
+#!/bin/sh
+# After each commit, stamp the commit's own SHA into index.html (cache-buster
+# + visible "source" link), then amend the commit to include the stamp.
+#
+# Why post-commit + amend instead of pre-commit: stamping the SHA into a
+# tracked file changes the tree, which changes the SHA. We resolve this by
+# stamping the *pre-amend* SHA. The amend produces a new SHA (the one that
+# gets pushed); the pre-amend SHA becomes dangling locally. To keep it
+# reachable on GitHub (so the /commit/<sha> link in the deployed page works),
+# we tag it `deployed-<short>` and rely on `push.followTags=true`.
+set -e
+
+# Recursion guard: our own `git commit --amend` below fires post-commit again.
+[ -n "$GIT_STAMPING" ] && exit 0
+
+SHA=$(git rev-parse HEAD)
+SHORT=$(printf '%s' "$SHA" | cut -c1-10)
+
+f=index.html
+tmp="$f.tmp.$$"
+# Replace any prior stamp. Patterns are anchored to the surrounding markup
+# so we never touch unrelated hex strings.
+sed -e "s|?v=[A-Za-z0-9]\{1,\}|?v=$SHORT|g" \
+    -e "s|window\.BUILD_ID=\"[A-Za-z0-9]*\"|window.BUILD_ID=\"$SHORT\"|g" \
+    -e "s|/passport-web/commit/[0-9a-fA-F]\{1,\}|/passport-web/commit/$SHA|g" \
+    -e "s|>source [0-9a-fA-F]\{1,\}<|>source $SHORT<|g" \
+    "$f" > "$tmp"
+
+if cmp -s "$f" "$tmp"; then
+  rm -f "$tmp"
+  exit 0
+fi
+
+mv "$tmp" "$f"
+# Keep the pre-amend commit reachable via a tag so /commit/<sha> resolves
+# on GitHub after `git push --follow-tags`.
+git tag -f "deployed-$SHORT" "$SHA" >/dev/null 2>&1 || true
+git add "$f"
+GIT_STAMPING=1 git commit --amend --no-edit --no-verify >/dev/null
