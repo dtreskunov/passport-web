@@ -32,8 +32,9 @@ if cmp -s "$f" "$tmp"; then
 fi
 
 mv "$tmp" "$f"
-# Keep the pre-amend commit reachable via a tag so /commit/<sha> resolves
-# on GitHub after `git push --follow-tags`.
-git tag -f "deployed-$SHORT" "$SHA" >/dev/null 2>&1 || true
+# Keep the pre-amend commit reachable via an *annotated* tag (lightweight
+# tags are not pushed by `push.followTags`). After `git push`, GitHub will
+# have both the amended HEAD and this tag, so /commit/<sha> resolves.
+git tag -a -f -m "deploy of $SHA" "deployed-$SHORT" "$SHA" >/dev/null 2>&1 || true
 git add "$f"
 GIT_STAMPING=1 git commit --amend --no-edit --no-verify >/dev/null
