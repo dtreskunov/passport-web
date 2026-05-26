@@ -12,12 +12,13 @@ on first use.
 ## One-time setup (per clone)
 
 Enable the cache-busting / source-link post-commit hook so each commit stamps
-its own SHA into `index.html` (also tagged `deployed-<short>` so the link
-resolves on GitHub):
+its own SHA into `index.html`, plus push refspecs so the per-deploy tags
+(which keep the linked commits reachable on GitHub) ship with `git push`:
 
 ```sh
 git config core.hooksPath .githooks
-git config push.followTags true
+git config --add remote.origin.push 'refs/heads/main:refs/heads/main'
+git config --add remote.origin.push 'refs/tags/deployed-*:refs/tags/deployed-*'
 ```
 
 ## Run locally
