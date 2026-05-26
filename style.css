@@ -120,6 +120,25 @@ button {
 }
 .iconbtn:hover { background: rgba(0, 0, 0, 0.75); }
 
+.camera-select {
+  height: 40px;
+  max-width: 60%;
+  padding: 0 32px 0 14px;
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.55) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23fff' d='M6 8 0 0h12z'/></svg>") no-repeat right 12px center;
+  color: #fff;
+  border: 0;
+  font: inherit;
+  font-size: 14px;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+.camera-select option { color: #000; }
+.camera-select[hidden] { display: none; }
+
 /* ── Topbar overlay (camera + result) ──────────────────────────────────── */
 .topbar {
   position: absolute;
@@ -141,8 +160,18 @@ button {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  transform: scaleX(-1);  /* mirror like a selfie camera */
 }
+/* Mirror selfie cameras; rotate -90° per tap of an edge arrow. For the
+   mirrored case, mirror is applied to the source first (rightmost in the
+   CSS transform), then rotate, so the displayed image rotates CCW with
+   tap-right just like the unmirrored case. */
+#video.mirrored                 { transform: scaleX(-1); }
+#video.rot-1                    { transform: rotate(-90deg); }
+#video.rot-2                    { transform: rotate(-180deg); }
+#video.rot-3                    { transform: rotate(-270deg); }
+#video.rot-1.mirrored           { transform: rotate(-90deg)  scaleX(-1); }
+#video.rot-2.mirrored           { transform: rotate(-180deg) scaleX(-1); }
+#video.rot-3.mirrored           { transform: rotate(-270deg) scaleX(-1); }
 .tap-target {
   position: absolute;
   inset: 0;
@@ -182,6 +211,28 @@ button {
   white-space: nowrap;
 }
 .hint[hidden] { display: none; }
+
+/* ── Orientation arrows (camera) ───────────────────────────────────────── */
+.top-arrow {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border: 0;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  z-index: 7;
+}
+.top-arrow-t { top: max(72px, calc(env(safe-area-inset-top) + 56px)); left: 50%; transform: translateX(-50%); }
+.top-arrow-b { bottom: max(80px, calc(env(safe-area-inset-bottom) + 64px)); left: 50%; transform: translateX(-50%); }
+.top-arrow-l { left: 16px;  top: 50%; transform: translateY(-50%); }
+.top-arrow-r { right: 16px; top: 50%; transform: translateY(-50%); }
 
 /* ── Result ────────────────────────────────────────────────────────────── */
 .result-screen { background: #000; }

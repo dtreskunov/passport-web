@@ -41,6 +41,8 @@ const cameraHint    = document.getElementById("cameraHint");
 const cameraSpinner = document.getElementById("cameraSpinner");
 const countdownEl   = document.getElementById("countdown");
 const cameraBackBtn = document.getElementById("cameraBackBtn");
+const cameraSelect  = document.getElementById("cameraSelect");
+const topArrows     = document.querySelectorAll(".top-arrow");
 const resultBackBtn = document.getElementById("resultBackBtn");
 const capturedCv    = document.getElementById("captured");
 const overlayCv     = document.getElementById("overlay");
@@ -65,6 +67,8 @@ let landmarks = null;          // 478 normalized landmarks for the captured fram
 let plan = null;               // {x, y, size, headRatio, eyeFromBottom, warnings}
 let cameFrom = null;           // 'camera' | 'upload'
 let countdownTimer = null;
+let isFrontCamera = true;  // mirror preview + capture only for selfie cameras
+let rotateQuarters = 0;    // 0..3 quarter-turns CCW, toggled by the rotate button
 
 // Eye landmarks for the eye line (eyelid + corners on both eyes).
 const EYE_LM = [159, 145, 33, 133, 386, 374, 263, 362];
@@ -219,6 +223,92 @@ async function pickPhotoSettings(track) {
   }
 }
 // ── Camera ─────────────────────────────────────────────────────────────────
+async function openStream(deviceId) {
+  // Preview track only needs to look sharp at the current viewport; the
+  // still photo is grabbed at the camera's native sensor resolution via
+  // ImageCapture.takePhoto() below. This keeps the live stream cheap.
+  const dpr = window.devicePixelRatio || 1;
+  const previewIdeal = Math.min(
+    640,
+    Math.round(Math.max(window.innerWidth, window.innerHeight) * dpr),
+  );
+  const videoConstraints = {
+    width:  { ideal: previewIdeal },
+    height: { ideal: previewIdeal },
+  };
+  if (deviceId) videoConstraints.deviceId = { exact: deviceId };
+  else videoConstraints.facingMode = "user";
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: videoConstraints,
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+  photoSettings = await pickPhotoSettings(stream.getVideoTracks()[0]);
+  isFrontCamera = detectFrontCamera(stream.getVideoTracks()[0], deviceId);
+  video.classList.toggle("mirrored", isFrontCamera);
+}
+
+// `track.getSettings().facingMode` is not always exposed (esp. Firefox
+// Android). Fall back to the device label, then assume front-facing
+// (matches the initial `facingMode: "user"` request).
+function detectFrontCamera(track, deviceId) {
+  const fm = track?.getSettings?.().facingMode;
+  if (fm === "user") return true;
+  if (fm === "environment") return false;
+  if (deviceId && cameraSelect.options.length) {
+    const opt = [...cameraSelect.options].find(o => o.value === deviceId);
+    const label = (opt?.textContent || "").toLowerCase();
+    if (/back|rear|environment/.test(label)) return false;
+    if (/front|user|face|selfie/.test(label)) return true;
+  }
+  return !deviceId;  // initial open requested facingMode: "user"
+}
+
+async function populateCameraSelect() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  let devices;
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch {
+    return;
+  }
+  const cams = devices.filter(d => d.kind === "videoinput");
+  if (cams.length <= 1) {
+    cameraSelect.hidden = true;
+    return;
+  }
+  const currentId = stream?.getVideoTracks()[0]?.getSettings().deviceId;
+  cameraSelect.innerHTML = "";
+  cams.forEach((cam, i) => {
+    const opt = document.createElement("option");
+    opt.value = cam.deviceId;
+    opt.textContent = cam.label || `Camera ${i + 1}`;
+    if (cam.deviceId === currentId) opt.selected = true;
+    cameraSelect.appendChild(opt);
+  });
+  cameraSelect.hidden = false;
+}
+
+async function switchCamera(deviceId) {
+  cameraHint.hidden = true;
+  cameraSpinner.hidden = false;
+  cancelCountdown();
+  stopCamera();
+  // Brief yield: Firefox Android throws NotReadableError if getUserMedia
+  // is called immediately after track.stop().
+  await new Promise(r => setTimeout(r, 120));
+  try {
+    await openStream(deviceId);
+    cameraSpinner.hidden = true;
+    cameraHint.hidden = false;
+  } catch (err) {
+    cameraSpinner.hidden = true;
+    alert("Camera error: " + err.message);
+    show("welcome");
+  }
+}
+
 async function enterCamera() {
   show("camera");
   countdownEl.hidden = true;
@@ -230,28 +320,13 @@ async function enterCamera() {
   cameraHint.hidden = true;
   cameraSpinner.hidden = false;
   try {
-    // Preview track only needs to look sharp at the current viewport; the
-    // still photo is grabbed at the camera's native sensor resolution via
-    // ImageCapture.takePhoto() below. This keeps the live stream cheap.
-    const dpr = window.devicePixelRatio || 1;
-    const previewIdeal = Math.min(
-      640,
-      Math.round(Math.max(window.innerWidth, window.innerHeight) * dpr),
-    );
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "user",
-        width:  { ideal: previewIdeal },
-        height: { ideal: previewIdeal },
-      },
-      audio: false,
-    });
-    video.srcObject = stream;
-    await video.play();
-    photoSettings = await pickPhotoSettings(stream.getVideoTracks()[0]);
+    await openStream();
     ensureWarm().catch(() => {});  // warm the model in the worker
     cameraSpinner.hidden = true;
     cameraHint.hidden = false;
+    // Labels are only populated after permission is granted, so enumerate
+    // after the first stream opens.
+    populateCameraSelect().catch(() => {});
   } catch (err) {
     cameraSpinner.hidden = true;
     alert("Camera error: " + err.message);
@@ -300,12 +375,25 @@ function startCountdown() {
 }
 
 async function mirrorBitmap(src) {
-  const w = src.width, h = src.height;
-  const off = new OffscreenCanvas(w, h);
+  return transformBitmap(src, true, 0);
+}
+
+// Apply mirror (selfie flip) and/or N × -90° rotation in a single canvas
+// op. Order matches the CSS preview: rotate first, then mirror in rotated
+// space. `quarters` is 0..3 quarter-turns counter-clockwise.
+async function transformBitmap(src, mirror, quarters) {
+  const q = ((quarters % 4) + 4) % 4;
+  if (!mirror && q === 0) return src;
+  const sw = src.width, sh = src.height;
+  const swap = q === 1 || q === 3;
+  const dw = swap ? sh : sw;
+  const dh = swap ? sw : sh;
+  const off = new OffscreenCanvas(dw, dh);
   const octx = off.getContext("2d");
-  octx.translate(w, 0);
-  octx.scale(-1, 1);
-  octx.drawImage(src, 0, 0, w, h);
+  octx.translate(dw / 2, dh / 2);
+  if (q) octx.rotate(-Math.PI / 2 * q);
+  if (mirror) octx.scale(-1, 1);
+  octx.drawImage(src, -sw / 2, -sh / 2);
   return await createImageBitmap(off);
 }
 
@@ -315,12 +403,14 @@ async function captureFromVideo() {
   if (!video.videoWidth) return;
   const myId = ++captureId;
   const myStream = stream;  // snapshot so retake doesn't kill the new stream
+  const myMirror = isFrontCamera;
+  const myRotate = rotateQuarters;
 
   // 1. Grab the current low-res preview frame and run detection on it
   //    immediately so the user sees a result quickly.
   const previewBmp = await createImageBitmap(video);
-  capturedBitmap = await mirrorBitmap(previewBmp);
-  capturedMirrored = true;
+  capturedBitmap = await transformBitmap(previewBmp, myMirror, myRotate);
+  capturedMirrored = myMirror;
   cameFrom = "camera";
 
   // 2. Kick off the high-res photo capture in parallel; swap it in once
@@ -332,7 +422,7 @@ async function captureFromVideo() {
       const ic = new ImageCapture(track);
       const blob = await ic.takePhoto(photoSettings || undefined);
       const bmp = await createImageBitmap(blob);
-      return await mirrorBitmap(bmp);
+      return await transformBitmap(bmp, myMirror, myRotate);
     } catch {
       return null;
     }
@@ -1044,6 +1134,19 @@ resultBackBtn.addEventListener("click", backToWelcome);
 // the back button (it stops propagation via stopPropagation below).
 cameraTap.addEventListener("pointerdown", startCountdown);
 cameraBackBtn.addEventListener("pointerdown", e => e.stopPropagation());
+cameraSelect.addEventListener("pointerdown", e => e.stopPropagation());
+cameraSelect.addEventListener("change", () => switchCamera(cameraSelect.value));
+for (const arrow of topArrows) {
+  arrow.addEventListener("pointerdown", e => e.stopPropagation());
+  arrow.addEventListener("click", () => {
+    // The arrows are fixed in screen space, so tapping one rotates the
+    // image so that the corresponding screen edge becomes the new top.
+    const delta = Number(arrow.dataset.edge);
+    rotateQuarters = (rotateQuarters + delta) % 4;
+    video.classList.remove("rot-1", "rot-2", "rot-3");
+    if (rotateQuarters) video.classList.add("rot-" + rotateQuarters);
+  });
+}
 
 redoBtn.addEventListener("click", retake);
 fixBgBtn.addEventListener("click", fixBackground);

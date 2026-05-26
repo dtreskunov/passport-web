@@ -38,7 +38,12 @@
     <div id="cameraSpinner" class="spinner" hidden aria-label="Starting camera"></div>
     <div class="topbar">
       <button id="cameraBackBtn" class="iconbtn" aria-label="Back">✕</button>
+      <select id="cameraSelect" class="camera-select" aria-label="Choose camera" hidden></select>
     </div>
+    <button class="top-arrow top-arrow-t" data-edge="0" aria-label="Make top edge the top">↑ TOP</button>
+    <button class="top-arrow top-arrow-r" data-edge="1" aria-label="Make right edge the top">TOP →</button>
+    <button class="top-arrow top-arrow-b" data-edge="2" aria-label="Make bottom edge the top">TOP ↓</button>
+    <button class="top-arrow top-arrow-l" data-edge="3" aria-label="Make left edge the top">← TOP</button>
     <p id="cameraHint" class="hint" hidden>Tap anywhere to start 3-second timer</p>
   </section>
 
