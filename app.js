@@ -734,21 +734,41 @@ function updateBgUI() {
 }
 
 // Replace the background of the captured frame with solid white using the
-// MediaPipe selfie-multiclass segmenter (category 0 == background).
+// MediaPipe selfie-multiclass segmenter (category 0 == background). The
+// entire pipeline — segmentation, guided-filter refinement, local-bg
+// color field, and per-pixel matting — operates inside the crop rectangle
+// only. The crop is the sole region that ends up in the downloaded JPEG,
+// so anything outside it is just throwaway work. Scoping to the crop
+// also gives the 256² segmenter much better effective resolution
+// because its input frame is now the head/shoulders region rather than
+// the entire captured photo.
 async function fixBackground() {
   if (!capturedBitmap) return;
   fixBgBtn.disabled = true;
   const origLabel = fixBgBtn.textContent;
   fixBgBtn.textContent = "Fixing background…";
   try {
-    const W = capturedCv.width, H = capturedCv.height;
+    const fullW = capturedCv.width, fullH = capturedCv.height;
+    // Clamp the crop rectangle to image bounds defensively.
+    const cx = Math.max(0, Math.min(fullW - 1, plan.x | 0));
+    const cy = Math.max(0, Math.min(fullH - 1, plan.y | 0));
+    const cw = Math.max(1, Math.min(fullW - cx, plan.size | 0));
+    const ch = Math.max(1, Math.min(fullH - cy, plan.size | 0));
+
+    // Extract the crop region into its own canvas. Everything below
+    // works in crop-local coordinates; we composite the fixed crop
+    // back into capturedCv at (cx, cy) at the very end.
+    const cropCv = new OffscreenCanvas(cw, ch);
+    const cropCtx = cropCv.getContext("2d", { willReadFrequently: true });
+    cropCtx.drawImage(capturedCv, cx, cy, cw, ch, 0, 0, cw, ch);
+
     // Segmenter's native input is 256x256; running larger doesn't help.
     const SEG = 256;
-    const segBmp = await toBitmap(capturedCv, 0, 0, W, H, SEG, SEG);
+    const segBmp = await toBitmap(cropCv, 0, 0, cw, ch, SEG, SEG);
     const { mask: bgArr, mw, mh } = await rpc("segment", { bitmap: segBmp }, [segBmp]);
 
     // Stash mask alpha (= 1 - P(background)) as an RGBA canvas so the
-    // browser can bilinearly upscale it to the photo's native resolution.
+    // browser can bilinearly upscale it to the crop's native resolution.
     const maskCv = new OffscreenCanvas(mw, mh);
     const mctx = maskCv.getContext("2d");
     const mImg = mctx.createImageData(mw, mh);
@@ -758,60 +778,57 @@ async function fixBackground() {
     mctx.putImageData(mImg, 0, 0);
 
     // Refine the coarse 256-px mask with an edge-aware guided filter
-    // (He et al. 2010), using the photo's luminance as the guide. The
+    // (He et al. 2010), using the crop's luminance as the guide. The
     // resulting alpha snaps to actual hair / jaw / shoulder edges in the
     // photo instead of the soft bilinear-upsample blur that produced the
     // visible halo, and low-confidence ghost regions vanish into the
     // background mean without needing a separate sigmoid hardening pass.
-    // Returns a single-channel Uint8Array(W·H), not RGBA.
-    const upAlpha = refineMaskGuided(maskCv, capturedCv, W, H);
+    // Returns a single-channel Uint8Array(cw·ch), not RGBA.
+    const upAlpha = refineMaskGuided(maskCv, cropCv, cw, ch);
 
-    // Pull the photo at full resolution directly from capturedCv (no
-    // extra OffscreenCanvas copy — that would cost W·H·4 bytes for
-    // nothing). sdata length is W·H·4.
-    const cctx = capturedCv.getContext("2d", { willReadFrequently: true });
-    const sdata = cctx.getImageData(0, 0, W, H).data;
-    const Npx = W * H;
+    // Pull the crop's pixels at full resolution. sdata length is cw·ch·4.
+    const sdata = cropCtx.getImageData(0, 0, cw, ch).data;
+    const Npx = cw * ch;
 
     // Estimate the *old* background as a smooth spatially-varying color
     // field instead of one global average. Real backgrounds aren't a
     // single color (warmer near a wall, cooler near a window, etc.), and
     // subtracting one global mean from edge pixels in the matting
-    // equation leaves a tinted halo. We sample the photo only where the
+    // equation leaves a tinted halo. We sample the crop only where the
     // refined alpha says definitely-background, then box-filter to
     // extend the color into the foreground region.
     //
     // The bg field varies slowly, so we operate at a coarse ~200-px
     // working resolution and bilinearly sample it inline during matting
     // — that avoids two full-resolution canvas allocations.
-    const bgScale = 200 / Math.max(W, H);
-    const bgW = Math.max(32, Math.round(W * bgScale));
-    const bgH = Math.max(32, Math.round(H * bgScale));
+    const bgScale = 200 / Math.max(cw, ch);
+    const bgW = Math.max(32, Math.round(cw * bgScale));
+    const bgH = Math.max(32, Math.round(ch * bgScale));
     const bgN = bgW * bgH;
     const bgCv = new OffscreenCanvas(bgW, bgH);
     const bgctx = bgCv.getContext("2d", { willReadFrequently: true });
     bgctx.imageSmoothingEnabled = true;
     bgctx.imageSmoothingQuality = "high";
-    bgctx.drawImage(capturedCv, 0, 0, bgW, bgH);
+    bgctx.drawImage(cropCv, 0, 0, bgW, bgH);
     const bgSrc = bgctx.getImageData(0, 0, bgW, bgH).data;
 
     // Downsample the alpha to the bg grid via box-average in JS — no
     // intermediate canvases. For each bg cell, average the upAlpha
-    // values from the photo region that maps to it.
+    // values from the crop region that maps to it.
     const aLow = new Uint8Array(bgN);
     {
-      const stepX = W / bgW, stepY = H / bgH;
+      const stepX = cw / bgW, stepY = ch / bgH;
       for (let by = 0; by < bgH; by++) {
         const y0 = (by * stepY) | 0;
-        const y1 = Math.min(H, (((by + 1) * stepY) | 0) + 1);
+        const y1 = Math.min(ch, (((by + 1) * stepY) | 0) + 1);
         for (let bx = 0; bx < bgW; bx++) {
           const x0 = (bx * stepX) | 0;
-          const x1 = Math.min(W, (((bx + 1) * stepX) | 0) + 1);
+          const x1 = Math.min(cw, (((bx + 1) * stepX) | 0) + 1);
           let sum = 0, n = 0;
           // Skip-sample: stepping by 2 in each axis is plenty at this
           // resolution and cuts the inner loop work by 4×.
           for (let y = y0; y < y1; y += 2) {
-            const row = y * W;
+            const row = y * cw;
             for (let x = x0; x < x1; x += 2) { sum += upAlpha[row + x]; n++; }
           }
           aLow[by * bgW + bx] = n ? (sum / n) | 0 : 0;
@@ -877,11 +894,10 @@ async function fixBackground() {
     // (no full-res upsample needed), so warm walls and cool windows
     // decontaminate correctly.
     //
-    // Write the result *back into the existing capturedCv ImageData
-    // buffer* (sdata) instead of allocating a new W·H·4 ImageData —
-    // sdata is no longer needed as input after this loop. Saves ~29 MB
-    // on a 7 MP photo.
-    const sxScale = (bgW - 1) / W, syScale = (bgH - 1) / H;
+    // Write the result *back into the existing crop ImageData buffer*
+    // (sdata) instead of allocating a new cw·ch·4 ImageData — sdata is
+    // no longer needed as input after this loop.
+    const sxScale = (bgW - 1) / cw, syScale = (bgH - 1) / ch;
     for (let i = 0, px = 0; px < Npx; i += 4, px++) {
       const a = upAlpha[px] / 255;
       if (a <= 0) {
@@ -893,7 +909,7 @@ async function fixBackground() {
         continue;
       }
       // Bilinear lookup in the low-res bg color field.
-      const x = px % W, y = (px / W) | 0;
+      const x = px % cw, y = (px / cw) | 0;
       const fx = x * sxScale, fy = y * syScale;
       const x0 = fx | 0, y0 = fy | 0;
       const x1 = x0 + 1 < bgW ? x0 + 1 : x0;
@@ -919,10 +935,12 @@ async function fixBackground() {
       sdata[i + 3] = 255;
     }
 
-    // Write back into capturedCv directly via putImageData. Wrapping
-    // sdata in a fresh ImageData object avoids re-allocating its W·H·4
-    // buffer (the constructor adopts the typed array).
-    cctx.putImageData(new ImageData(sdata, W, H), 0, 0);
+    // Write the fixed pixels back into the crop canvas, then composite
+    // that crop into capturedCv at its original (cx, cy) — leaving
+    // outside-the-crop pixels untouched.
+    cropCtx.putImageData(new ImageData(sdata, cw, ch), 0, 0);
+    const cctx = capturedCv.getContext("2d");
+    cctx.drawImage(cropCv, 0, 0, cw, ch, cx, cy, cw, ch);
     // Release the old captured bitmap immediately rather than waiting
     // for GC, then take a fresh one from the updated canvas.
     capturedBitmap.close?.();
