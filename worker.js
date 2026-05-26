@@ -45,7 +45,10 @@ function getLandmarker() {
           "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
         delegate: "GPU",
       },
-      runningMode: "IMAGE",
+      // VIDEO mode so the same instance handles both per-frame live
+      // detection (camera screen) and the one-off capture detect. Both
+      // call detectForVideo with a monotonic timestamp.
+      runningMode: "VIDEO",
       numFaces: 1,
     });
   })();
@@ -86,6 +89,16 @@ function getSegmenter() {
   return segmenterPromise;
 }
 
+// Strictly increasing timestamp (ms) required by detectForVideo across
+// calls. Initialized to 0; nextTs(t) clamps any caller-supplied time so
+// it always advances by at least 1 ms.
+let videoTs = 0;
+function nextTs(t) {
+  const v = (typeof t === "number" && t > videoTs) ? t : videoTs + 1;
+  videoTs = v;
+  return v;
+}
+
 // Warm: load landmarker and run a dummy detect so the GPU shader-compile
 // cost is paid up-front rather than on the first real detect.
 async function warm() {
@@ -94,12 +107,12 @@ async function warm() {
   const cctx = c.getContext("2d");
   cctx.fillStyle = "#888";
   cctx.fillRect(0, 0, 64, 64);
-  try { lm.detect(c); } catch { /* best-effort */ }
+  try { lm.detectForVideo(c, nextTs()); } catch { /* best-effort */ }
 }
 
-async function detectLandmarks(bitmap) {
+async function detectLandmarks(bitmap, ts) {
   const lm = await getLandmarker();
-  const res = lm.detect(bitmap);
+  const res = lm.detectForVideo(bitmap, nextTs(ts));
   if (res.faceLandmarks && res.faceLandmarks.length) {
     // Return as a flat Float32Array for cheap transfer: [x0,y0,z0, x1,y1,z1, …].
     const pts = res.faceLandmarks[0];
@@ -147,7 +160,7 @@ self.addEventListener("message", async (ev) => {
         result = null;
         break;
       case "landmarks": {
-        const r = await detectLandmarks(ev.data.bitmap);
+        const r = await detectLandmarks(ev.data.bitmap, ev.data.ts);
         ev.data.bitmap.close?.();
         if (r.landmarks) transfer.push(r.landmarks.buffer);
         result = r;

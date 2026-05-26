@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <base href="./" />
   <title>Passport Photo</title>
-  <link rel="stylesheet" href="style.css?v=74a0f2a206" />
-  <script>window.BUILD_ID="74a0f2a206";</script>
+  <link rel="stylesheet" href="style.css?v=943c08cda9" />
+  <script>window.BUILD_ID="943c08cda9";</script>
 </head>
 <body>
   <!-- Welcome -->
@@ -26,13 +26,14 @@
         <div id="welcomeSpinner" class="spinner inline" aria-label="Loading"></div>
         <input id="fileInput" type="file" accept="image/*" hidden />
       </div>
-      <p class="footnote">Runs entirely in your browser; nothing is uploaded. &middot; <a href="https://github.com/dtreskunov/passport-web/commit/74a0f2a206bbdb2159f0081dc183d8fe9a34d67d" target="_blank" rel="noopener">source 74a0f2a206</a></p>
+      <p class="footnote">Runs entirely in your browser; nothing is uploaded. &middot; <a href="https://github.com/dtreskunov/passport-web/commit/943c08cda984cbf10e8b346df8caf4d07a7aed6d" target="_blank" rel="noopener">source 943c08cda9</a></p>
     </div>
   </section>
 
   <!-- Camera -->
   <section id="camera" class="screen camera-screen" hidden>
     <video id="video" autoplay playsinline muted></video>
+    <canvas id="cameraOverlay" class="camera-overlay"></canvas>
     <div id="cameraTap" class="tap-target">
       <div id="countdown" class="countdown" hidden></div>
     </div>
@@ -68,6 +69,6 @@
     </div>
   </section>
 
-  <script type="module" src="app.js?v=74a0f2a206"></script>
+  <script type="module" src="app.js?v=943c08cda9"></script>
 </body>
 </html>
