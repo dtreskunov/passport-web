@@ -172,6 +172,25 @@ button {
 #video.rot-1.mirrored           { transform: rotate(-90deg)  scaleX(-1); }
 #video.rot-2.mirrored           { transform: rotate(-180deg) scaleX(-1); }
 #video.rot-3.mirrored           { transform: rotate(-270deg) scaleX(-1); }
+
+/* Live face-detection overlay: same layout and CSS transforms as #video
+   so a rectangle drawn in source-pixel coords visually aligns with the
+   rotated/mirrored preview. Drawn-into by app.js' live detection loop. */
+.camera-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+.camera-overlay.mirrored                 { transform: scaleX(-1); }
+.camera-overlay.rot-1                    { transform: rotate(-90deg); }
+.camera-overlay.rot-2                    { transform: rotate(-180deg); }
+.camera-overlay.rot-3                    { transform: rotate(-270deg); }
+.camera-overlay.rot-1.mirrored           { transform: rotate(-90deg)  scaleX(-1); }
+.camera-overlay.rot-2.mirrored           { transform: rotate(-180deg) scaleX(-1); }
+.camera-overlay.rot-3.mirrored           { transform: rotate(-270deg) scaleX(-1); }
 .tap-target {
   position: absolute;
   inset: 0;

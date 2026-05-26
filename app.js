@@ -43,6 +43,7 @@ const countdownEl   = document.getElementById("countdown");
 const cameraBackBtn = document.getElementById("cameraBackBtn");
 const cameraSelect  = document.getElementById("cameraSelect");
 const topArrows     = document.querySelectorAll(".top-arrow");
+const cameraOverlay = document.getElementById("cameraOverlay");
 const resultBackBtn = document.getElementById("resultBackBtn");
 const capturedCv    = document.getElementById("captured");
 const overlayCv     = document.getElementById("overlay");
@@ -346,6 +347,7 @@ async function switchCamera(deviceId) {
   }
   cameraSpinner.hidden = true;
   cameraHint.hidden = false;
+  startLiveDetect();
 }
 
 function syncCameraSelectToStream() {
@@ -360,6 +362,131 @@ function disableCameraOption(deviceId, reason) {
     opt.disabled = true;
     opt.textContent = `${opt.textContent} (${reason})`;
   }
+}
+
+// ── Live face detection (camera preview) ───────────────────────────────────
+// While the camera screen is up, run FaceLandmarker on the live video and
+// draw a square showing the proposed passport crop. Green = the crop
+// would satisfy spec; amber = something's off (head too big/small,
+// eye line out of band, or face too close to a side edge).
+//
+// Detection runs at ~10 FPS on a downscaled, display-oriented bitmap so
+// MediaPipe sees an upright face even when the camera frame is sideways.
+// Landmarks come back in display-normalized coords; we map them back to
+// raw-source coords for plan computation, then draw the rect in source
+// pixel space on #cameraOverlay (which shares #video's mirror/rot CSS
+// classes, so the rect rotates with the displayed preview for free).
+let liveActive    = false;
+let liveInflight  = false;
+let liveLastT     = 0;
+const LIVE_MIN_INTERVAL = 100;  // ms (~10 FPS cap)
+const LIVE_DETECT_MAX   = 480;  // longer-side px fed to the model
+
+function startLiveDetect() {
+  if (liveActive) return;
+  liveActive = true;
+  liveLastT = 0;
+  requestAnimationFrame(liveTick);
+}
+
+function stopLiveDetect() {
+  liveActive = false;
+  const ctx = cameraOverlay.getContext("2d");
+  ctx.clearRect(0, 0, cameraOverlay.width, cameraOverlay.height);
+}
+
+function syncLiveOverlayClasses() {
+  const cls = "camera-overlay" +
+    (isFrontCamera   ? " mirrored" : "") +
+    (rotateQuarters  ? " rot-" + rotateQuarters : "");
+  if (cameraOverlay.className !== cls) cameraOverlay.className = cls;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (cameraOverlay.width !== vw || cameraOverlay.height !== vh) {
+    cameraOverlay.width = vw;
+    cameraOverlay.height = vh;
+  }
+}
+
+// Inverse of transformBitmap: take a normalized point in the display
+// (post mirror + rotate) bitmap and return the matching normalized point
+// in raw-source coords. transformBitmap mirrors first then rotates CCW;
+// we undo in reverse order: q CW rotations, then unmirror.
+function displayToSourceNorm(dx, dy, mirror, q) {
+  let x = dx, y = dy;
+  for (let i = 0; i < q; i++) {
+    const nx = y, ny = 1 - x;
+    x = nx; y = ny;
+  }
+  if (mirror) x = 1 - x;
+  return [x, y];
+}
+
+async function liveTick() {
+  if (!liveActive) return;
+  requestAnimationFrame(liveTick);
+  if (cameraScreen.hidden || !stream || !video.videoWidth) return;
+  if (liveInflight) return;
+  const now = performance.now();
+  if (now - liveLastT < LIVE_MIN_INTERVAL) return;
+  liveLastT = now;
+  liveInflight = true;
+
+  // Snapshot orientation state so a mid-tick switch doesn't desync.
+  const snapMirror = isFrontCamera;
+  const snapQ      = rotateQuarters;
+  syncLiveOverlayClasses();
+
+  try {
+    let bmp = await createImageBitmap(video);
+    const w0 = bmp.width, h0 = bmp.height;
+    const scale = Math.min(1, LIVE_DETECT_MAX / Math.max(w0, h0));
+    if (scale < 1) {
+      const small = await createImageBitmap(bmp, 0, 0, w0, h0, {
+        resizeWidth:  Math.round(w0 * scale),
+        resizeHeight: Math.round(h0 * scale),
+      });
+      bmp.close?.();
+      bmp = small;
+    }
+    const oriented = await transformBitmap(bmp, snapMirror, snapQ);
+    if (oriented !== bmp) bmp.close?.();
+    const r = await rpc(
+      "landmarks",
+      { bitmap: oriented, ts: now | 0 },
+      [oriented],
+    );
+    // Drop the result if the user rotated / switched cameras mid-flight.
+    if (snapMirror !== isFrontCamera || snapQ !== rotateQuarters) return;
+    const Ws = video.videoWidth, Hs = video.videoHeight;
+    let p = null;
+    if (r.landmarks) {
+      const flat = r.landmarks;
+      const lms = new Array(flat.length / 3);
+      for (let i = 0; i < lms.length; i++) {
+        const [sx, sy] = displayToSourceNorm(
+          flat[i * 3], flat[i * 3 + 1], snapMirror, snapQ,
+        );
+        lms[i] = { x: sx, y: sy, z: flat[i * 3 + 2] };
+      }
+      p = planFromLandmarks(lms, Ws, Hs);
+    }
+    drawLiveOverlay(p);
+  } catch {
+    /* per-frame errors swallowed */
+  } finally {
+    liveInflight = false;
+  }
+}
+
+function drawLiveOverlay(p) {
+  const ctx = cameraOverlay.getContext("2d");
+  const W = cameraOverlay.width, H = cameraOverlay.height;
+  ctx.clearRect(0, 0, W, H);
+  if (!p) return;
+  const ok = planMeetsSpec(p);
+  ctx.lineWidth   = Math.max(2, Math.round(Math.min(W, H) * 0.006));
+  ctx.strokeStyle = ok ? "rgba(60, 220, 80, 0.95)" : "rgba(255, 180, 60, 0.95)";
+  ctx.strokeRect(p.x, p.y, p.size, p.size);
 }
 
 async function enterCamera() {
@@ -380,6 +507,7 @@ async function enterCamera() {
     // Labels are only populated after permission is granted, so enumerate
     // after the first stream opens.
     populateCameraSelect().catch(() => {});
+    startLiveDetect();
   } catch (err) {
     cameraSpinner.hidden = true;
     alert("Camera error: " + err.message);
@@ -388,6 +516,7 @@ async function enterCamera() {
 }
 
 function stopCamera() {
+  stopLiveDetect();
   if (stream) {
     for (const t of stream.getTracks()) t.stop();
     stream = null;
@@ -454,6 +583,7 @@ let captureId = 0;  // invalidates in-flight hi-res swaps after retake/back
 
 async function captureFromVideo() {
   if (!video.videoWidth) return;
+  stopLiveDetect();
   const myId = ++captureId;
   const myStream = stream;  // snapshot so retake doesn't kill the new stream
   const myMirror = isFrontCamera;
@@ -586,14 +716,14 @@ function backToWelcome() {
 }
 
 // ── Plan: passport-spec square crop ────────────────────────────────────────
-function computePlan() {
-  if (!landmarks || !capturedBitmap) { plan = null; return; }
-  const W = capturedBitmap.width, H = capturedBitmap.height;
-  const headFrac = HEAD_FRAC;
-  const eyeFrac  = EYE_FRAC;
 
+// Pure version: derive a crop plan from landmarks + image dims. Returns
+// null if the eye landmarks were missing. Used both for the captured
+// frame (via computePlan, which also pushes UI state) and for live
+// preview detection (no UI side effects).
+function planFromLandmarks(lms, W, H, headFrac = HEAD_FRAC, eyeFrac = EYE_FRAC) {
   let minX = 1, minY = 1, maxX = 0, maxY = 0;
-  for (const p of landmarks) {
+  for (const p of lms) {
     const x = Math.min(1, Math.max(0, p.x));
     const y = Math.min(1, Math.max(0, p.y));
     if (x < minX) minX = x;
@@ -606,13 +736,13 @@ function computePlan() {
 
   let eyeSum = 0, eyeCount = 0;
   for (const i of EYE_LM) {
-    const p = landmarks[i];
+    const p = lms[i];
     if (p && Number.isFinite(p.y)) {
       eyeSum += Math.min(1, Math.max(0, p.y)) * H;
       eyeCount++;
     }
   }
-  if (eyeCount === 0) { plan = null; setStatus("Could not locate eyes.", "err"); return; }
+  if (eyeCount === 0) return null;
   const eyeY  = eyeSum / eyeCount;
   const faceX = bboxX + bboxW / 2;
   const chinY = bboxY + bboxH;
@@ -623,14 +753,9 @@ function computePlan() {
   const crownEstY  = chinY - headHeight;
 
   const cropSize = Math.round(headHeight / headFrac);
-
-  // Distinguish "crop had to be shrunk / shifted to fit the source" (the
-  // source frame isn't tall/wide enough for a spec crop) from "crop fits
-  // but ratios drift from spec" (recoverable by adjusting the source).
   const tooSmall = cropSize > Math.min(W, H);
   let s = tooSmall ? Math.min(W, H) : cropSize;
 
-  // Recenter on face/eye line *after* size clamp so the box stays centered.
   const wantX = Math.round(faceX - s / 2);
   const wantY = Math.round(eyeY - (1 - eyeFrac) * s);
   let x = wantX, y = wantY;
@@ -639,8 +764,6 @@ function computePlan() {
   if (y < 0)      { y = 0;     lack.above = true; }
   if (x + s > W)  { x = W - s; lack.right = true; }
   if (y + s > H)  { y = H - s; lack.below = true; }
-  // tooSmall means the source can't even hold the square; treat as lacking
-  // on whichever axis is short.
   if (tooSmall) {
     if (H < W) { lack.above = true; lack.below = true; }
     else       { lack.left = true;  lack.right = true; }
@@ -648,25 +771,40 @@ function computePlan() {
 
   const headRatio     = headHeight / s;
   const eyeFromBottom = (s - (eyeY - y)) / s;
-  const headBad = headRatio < 0.50 || headRatio > 0.69;
-  const eyeBad  = eyeFromBottom < 0.56 || eyeFromBottom > 0.69;
-
-  plan = {
+  return {
     x, y, size: s,
     eyeY, faceX, chinY, crownEstY,
     bboxX, bboxY, bboxW, bboxH,
     headRatio, eyeFromBottom,
+    lack,
   };
+}
+
+function planMeetsSpec(p) {
+  if (!p) return false;
+  const headOk = p.headRatio >= 0.50 && p.headRatio <= 0.69;
+  const eyeOk  = p.eyeFromBottom >= 0.56 && p.eyeFromBottom <= 0.69;
+  const sideOk = !p.lack.left && !p.lack.right;
+  return headOk && eyeOk && sideOk;
+}
+
+function computePlan() {
+  if (!landmarks || !capturedBitmap) { plan = null; return; }
+  const W = capturedBitmap.width, H = capturedBitmap.height;
+  plan = planFromLandmarks(landmarks, W, H);
+  if (!plan) { setStatus("Could not locate eyes.", "err"); return; }
 
   // Warn when the final crop is out of US passport spec, or when the face
   // sits so close to a side edge that the crop had to be shifted
   // horizontally (head/eye ratios are vertical metrics and won't catch
   // sideways clamping on their own).
-  const sideClamped = lack.left || lack.right;
+  const headBad = plan.headRatio < 0.50 || plan.headRatio > 0.69;
+  const eyeBad  = plan.eyeFromBottom < 0.56 || plan.eyeFromBottom > 0.69;
+  const sideClamped = plan.lack.left || plan.lack.right;
   if (headBad || eyeBad || sideClamped) {
     const dirs = [];
-    if (lack.above) dirs.push("above");
-    if (lack.below) dirs.push("below");
+    if (plan.lack.above) dirs.push("above");
+    if (plan.lack.below) dirs.push("below");
     if (sideClamped) dirs.push("beside");
     const where = dirs.length ? dirs.join(" / ") : "around";
     setWarning(`Retake with more space ${where} your head`);
