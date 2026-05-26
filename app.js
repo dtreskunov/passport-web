@@ -68,7 +68,7 @@ let plan = null;               // {x, y, size, headRatio, eyeFromBottom, warning
 let cameFrom = null;           // 'camera' | 'upload'
 let countdownTimer = null;
 let isFrontCamera = true;  // mirror preview + capture only for selfie cameras
-let rotateQuarters = 0;    // 0..3 quarter-turns CCW, toggled by the rotate button
+let rotateQuarters = 0;    // 0..3 quarter-turns CCW applied to preview + capture
 
 // Eye landmarks for the eye line (eyelid + corners on both eyes).
 const EYE_LM = [159, 145, 33, 133, 386, 374, 263, 362];
@@ -247,6 +247,34 @@ async function openStream(deviceId) {
   photoSettings = await pickPhotoSettings(stream.getVideoTracks()[0]);
   isFrontCamera = detectFrontCamera(stream.getVideoTracks()[0], deviceId);
   video.classList.toggle("mirrored", isFrontCamera);
+  autoOrient();
+}
+
+// Most browsers deliver the camera frame in the device's natural
+// orientation. When the screen is rotated relative to natural, the frame
+// looks sideways unless we rotate it back. Pick the CCW quarter-turn that
+// matches which physical edge is currently the top of the screen. The
+// edge arrows remain as a manual override for devices that don't follow
+// this convention.
+function autoOrient() {
+  const type = screen.orientation?.type;
+  if (!type) return;
+  // Camera mounts vary: this mapping assumes the frame's world-up is at
+  // the device's natural-left edge (the common Android phone case).
+  // Tweak via the edge arrows if a device deviates.
+  const map = {
+    "landscape-primary":   0,
+    "portrait-primary":    3,
+    "landscape-secondary": 2,
+    "portrait-secondary":  1,
+  };
+  setRotateQuarters(map[type] ?? 0);
+}
+
+function setRotateQuarters(q) {
+  rotateQuarters = ((q % 4) + 4) % 4;
+  video.classList.remove("rot-1", "rot-2", "rot-3");
+  if (rotateQuarters) video.classList.add("rot-" + rotateQuarters);
 }
 
 // `track.getSettings().facingMode` is not always exposed (esp. Firefox
@@ -1142,11 +1170,13 @@ for (const arrow of topArrows) {
     // The arrows are fixed in screen space, so tapping one rotates the
     // image so that the corresponding screen edge becomes the new top.
     const delta = Number(arrow.dataset.edge);
-    rotateQuarters = (rotateQuarters + delta) % 4;
-    video.classList.remove("rot-1", "rot-2", "rot-3");
-    if (rotateQuarters) video.classList.add("rot-" + rotateQuarters);
+    setRotateQuarters(rotateQuarters + delta);
   });
 }
+
+screen.orientation?.addEventListener("change", () => {
+  if (!cameraScreen.hidden && stream) autoOrient();
+});
 
 redoBtn.addEventListener("click", retake);
 fixBgBtn.addEventListener("click", fixBackground);
