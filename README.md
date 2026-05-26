@@ -11,11 +11,13 @@ on first use.
 
 ## One-time setup (per clone)
 
-Enable the cache-busting pre-commit hook so deployed asset URLs get a fresh
-`?v=` stamp on each commit (avoids the 10-min GitHub Pages browser cache):
+Enable the cache-busting / source-link post-commit hook so each commit stamps
+its own SHA into `index.html` (also tagged `deployed-<short>` so the link
+resolves on GitHub):
 
 ```sh
 git config core.hooksPath .githooks
+git config push.followTags true
 ```
 
 ## Run locally
